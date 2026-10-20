@@ -255,8 +255,11 @@ SPLIT_PART_MAX_LEN = 100       # 单段超过该字数时再按句号等标点�
 USE_CHAT_MODEL_FOR_VISION = False  # true=图片识别也用语言模型（V4.1原生多模态），false=用单独的视觉模型（原逻辑）
 # ---- 群聊自由聊天：没@也能主动接话 ----
 ENABLE_RANDOM_CHAT = False       # 总开关
-CHAT_TRIGGER_PROBABILITY = 0.15  # 每条没@的群消息触发判断的概率
-_random_follow_up = False          # 对话延续：刚回复完一轮，下一条100%触发自由聊天判断
+CHAT_TRIGGER_PROBABILITY = 0.30  # 每条没@的群消息触发"要不要接话"判断的概率
+FOLLOW_UP_TRIGGER_COUNT = 3      # 对话延续：AI正常回复一轮后，接下来N条群消息100%进入接话判断（0=关）
+FOLLOW_UP_WINDOW_SECONDS = 180   # 延续窗口有效期（秒）：AI回复后超过这个时间没消息，延续条数作废、回到概率判断（0=不过期）
+_random_follow_up_count = 0      # 对话延续剩余条数（>0时本条100%判断并-1，用完恢复概率）
+_random_followup_ts = 0.0        # 对话延续窗口设置时间戳（用于时效判断）
 
 # ---- AI回复转语音（edge-tts，免费在线合成；true=所有AI回复都发成语音条，false=原文本逻辑） ----
 ENABLE_TTS = False             # 总开关（配置文件 enable_tts 覆盖）
@@ -270,15 +273,12 @@ VOLC_VOICE = "zh_female_vv_uranus_bigtts"  # 音色ID
 PEAK_PERIOD_NAME = "高峰"       # 高峰时段自定义显示名（配置文件可改，如"梁文峰"）
 OFFPEAK_PERIOD_NAME = "空闲"    # 空闲时段自定义显示名（配置文件可改，如"梁文谷"）
 
-# ---- 永久记忆存档（memory.json：对话上下文+成员档案印象值+全局备忘，重启不丢） ----
+# ---- 永久记忆存档（memory.json：对话上下文+成员档案+全局备忘，重启不丢） ----
 ENABLE_MEMORY = True           # 永久记忆总开关
 MEMORY_CONTEXT_TURNS = 5       # 对话上下文持久化轮数（1轮=用户+AI各一条）
-MEMORY_INJECT_PROMPT = False   # 是否把成员档案/印象值/备忘注入system提示词；false=只记录存档+恢复上下文，完全不碰人格提示词（避免记忆把AI性格带偏）
+MEMORY_INJECT_PROMPT = False   # 是否把成员档案/备忘注入system提示词；false=只记录存档+恢复上下文，完全不碰人格提示词（避免记忆把AI性格带偏）
 MEMORY_FILE = None             # memory.json 绝对路径（配置加载时确定）
 memory_store = None            # MemoryStore 全局单例（配置加载后初始化）
-# ---- 印象值：AI自主记录对群成员的印象/特点/称呼，可参考但不被数值绑架，绝不在群里透露 ----
-ENABLE_FAVOR = True            # false=完全不注入印象值、也不允许AI修改印象值
-
 # ---- 群聊旁听缓存：没@机器人的群消息也存起来当上下文 ----
 # 每群最多 AMBIENT_MAX_MSGS 条，满了丢最旧的；每条截断到 AMBIENT_MSG_MAX_LEN 字；不设过期
 ENABLE_AMBIENT_CACHE = True
@@ -425,13 +425,33 @@ async def _should_reply_random(ws, group_id: int, user_id: int, text: str) -> bo
         if group_id in _group_members_cache:
             _info = _group_members_cache[group_id].get(user_id, {})
             _name = _info.get("card") or _info.get("nickname") or str(user_id)
-        _ctx_lines = _ambient_peek(group_id, limit=5)
-        _ctx = ("最近群聊：\n" + "\n".join(_ctx_lines) + "\n") if _ctx_lines else ""
-        judge_prompt = f"{_ctx}{_name}说：{text[:100]}\n\n你是群里的AI，判断要不要接这句话。以下情况要回复：在问你问题、寻求帮助、提到你、跟你说话、需要你参与讨论。以下情况可以不回复：纯自言自语、无意义内容、明显在跟别人说话。只回复一个字：要或不要。"
+        # ① 最近正式对话（含机器人自己的回复）——判断“对方是不是在接我刚才的话”的关键
+        _hist_lines = []
+        try:
+            for _msg in group_history.get(f"g_{group_id}", [])[-6:]:
+                _role = _msg.get("role")
+                _c = (_msg.get("content") or "").strip()
+                if not _c or _role not in ("user", "assistant"):
+                    continue
+                _c = re.sub(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\[QQ号:\d+\]\s*", "", _c)
+                _c = _c.replace("\n", " ").strip()
+                if not _c:
+                    continue
+                _hist_lines.append(("你：" if _role == "assistant" else "群友：") + _c[:80])
+        except Exception:
+            pass
+        _hist_block = ("你和群友最近的对话（最下面是最新的）：\n" + "\n".join(_hist_lines) + "\n") if _hist_lines else ""
+        # ② 群里其他没@你的闲聊（排除末尾那条=当前待判断消息，避免重复）
+        _ctx_lines = _ambient_peek(group_id, limit=5, drop_last=1)
+        _ctx = ("群里其他闲聊（都没@你）：\n" + "\n".join(_ctx_lines) + "\n") if _ctx_lines else ""
+        judge_prompt = (
+            f"{_hist_block}{_ctx}\n现在需要你判断的消息：\n{_name}说：{text[:100]}\n\n"
+            "结合上面的上下文和你自己的人设，判断你想不想接这句话。没有固定标准，由你自己决定：想接就回“要”，不想接就回“不要”。只回复一个字：要或不要。"
+        )
         _headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         # 注入系统提示词（人设），让AI根据自己的性格判断要不要接话（截断到500字避免浪费）
         _sys_prompt = (SYSTEM_PROMPT[:500] + "…") if len(SYSTEM_PROMPT) > 500 else SYSTEM_PROMPT
-        _judge_sys = _sys_prompt + "\n\n【任务】根据你的人设，判断这条群消息你要不要接话回复。以下情况要回复：在问你问题、寻求帮助、提到你、跟你说话、需要你参与讨论、符合你性格想吐槽的。以下情况可以不回复：纯自言自语、无意义内容、明显在跟别人说话、你不感兴趣的话题。只回复一个字：要或不要，不要解释。"
+        _judge_sys = _sys_prompt + "\n\n【任务】结合对话上下文与你的人设，判断你想不想接群友这句话。没有固定标准，由你自己决定。只回复一个字：要或不要，不要解释。"
         _payload = {
             "model": DEEPSEEK_MODEL,
             "messages": [
@@ -587,7 +607,50 @@ _last_link_download = {}         # chat_id -> 最近一次链接下载开始时�
 LINK_DOWNLOAD_COOLDOWN = 10      # 同一会话链接下载冷却（秒）
 
 
-def web_search(query: str, num_results: int = 3) -> str:
+# 官网类搜索的SEO垃圾导航/采集站特征（命中降权，避免被"XX官网入口"类采集站霸榜）
+_SEARCH_SPAM_HOST = ("nav", "sites/", "siteinfo", "/faq", "mipx", "downke", "downcc",
+                     "daohang", "/zt/", "/tag/", "zuoshipin", "php.cn", "studynav",
+                     "biemoyu", "ailxg", "wwiki", "zhaoshiwen", "golue", "yoyou")
+_SEARCH_SPAM_TITLE = ("官网入口", "官网下载", "中文官网", "在线入口", "移动版", "导航网", "新手必看")
+
+
+def _search_brand_core(query: str):
+    """若query含“官网/官方/official”意图，剥离后缀返回核心品牌词（用于纠偏SEO导航站）；否则返回None"""
+    if not re.search(r"官网|官方|official", query or "", re.I):
+        return None
+    c = re.sub(r"官网|官方网站|官方|网址|网站|入口|地址|是什么|下载|official|site", " ",
+               query or "", flags=re.I)
+    c = re.sub(r"\s+", " ", c).strip()
+    return c or None
+
+
+def _rerank_official(items: list, brand: str) -> list:
+    """官网意图时重排博查结果：品牌主域命中优先、根路径加分、SEO采集/导航站降权"""
+    from urllib.parse import urlparse
+    b = (brand or "").lower().replace(" ", "").replace("-", "")
+    has_alpha = any(ch.isascii() and ch.isalpha() for ch in b)
+    def _score(it):
+        u = it.get("displayUrl") or it.get("url") or ""
+        pu = urlparse(u if "://" in u else "https://" + u)
+        host = re.sub(r"^(www|m|wap|h5|mobile|app)\.", "", pu.netloc.lower()).replace("h5-", "")
+        title = it.get("name") or ""
+        s = 0
+        if has_alpha and b and b in host.replace("-", "").replace(".", ""):
+            s += 100  # 品牌主域命中，最可能是官网
+        if has_alpha and re.search(r"h5-|test\d|^\d", host):
+            s -= 30   # 山寨/测试域名
+        if pu.path in ("", "/"):
+            s += 10   # 根路径更像官网首页
+        low = (u + " " + host).lower()
+        if any(x in low for x in _SEARCH_SPAM_HOST):
+            s -= 50
+        if any(x in title for x in _SEARCH_SPAM_TITLE):
+            s -= 40
+        return s
+    return sorted(items, key=_score, reverse=True)
+
+
+def web_search(query: str, num_results: int = 8) -> str:
     """用博查AI联网搜索，返回搜索结果摘要"""
     _increment_stat("websearch_calls")
     try:
@@ -596,9 +659,15 @@ def web_search(query: str, num_results: int = 3) -> str:
             "Authorization": f"Bearer {BOCHA_API_KEY}",
             "Content-Type": "application/json"
         }
+        num_results = int(num_results or 8)
+        # 官网意图时剥离“官网”等后缀、改用核心品牌词搜索（实测能显著减少SEO导航站霸榜）
+        _brand = _search_brand_core(query)
+        _api_q = _brand if _brand else query
+        # 官网导航意图多取若干条供品牌主域重排；普通查询按配置条数直取、不做内容筛选（信任模型）
+        _fetch = max(10, min(50, num_results)) if _brand else num_results
         payload = {
-            "query": query,
-            "count": num_results,
+            "query": _api_q,
+            "count": _fetch,
             "summary": True
         }
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
@@ -609,23 +678,37 @@ def web_search(query: str, num_results: int = 3) -> str:
         data = res_json.get("data", {})
         # 博查返回格式：data.webPages.value
         web_pages = data.get("webPages", {})
-        value_list = web_pages.get("value", [])
+        value_list = web_pages.get("value", []) or []
+        # 官网意图：品牌主域优先、SEO采集/导航站降权
+        if _brand:
+            value_list = _rerank_official(value_list, _brand)
 
         for item in value_list[:num_results]:
             title = item.get("name", "")  # 博查用name字段
-            snippet = item.get("snippet", "")  # 博查用snippet字段
-            url = item.get("url", "")
+            # 优先用AI总结summary（网页正文摘要、更完整），回退到短摘要snippet
+            content = (item.get("summary") or item.get("snippet") or "").strip()
+            if len(content) > 800:
+                content = content[:800] + "…"
+            url = item.get("url") or item.get("displayUrl", "")
             display_url = item.get("displayUrl", "")
+            site = item.get("siteName", "")
+            date = (item.get("datePublished") or "")[:10]
 
-            if title and snippet:
+            if title and content:
+                meta = site + (f"（{date}）" if date else "")
                 result_str = f"标题：{title}"
-                if display_url:
-                    result_str += f"\n来源：{display_url}"
-                result_str += f"\n摘要：{snippet}"
+                if meta:
+                    result_str += f"\n来源：{meta}"
+                if display_url or url:
+                    result_str += f"\n链接：{display_url or url}"
+                result_str += f"\n内容：{content}"
                 results.append(result_str)
 
         if results:
-            return "\n\n".join(results)
+            _out = "\n\n".join(results)
+            if len(_out) > 20000:
+                _out = _out[:20000] + "\n…（结果过长，已截断）"
+            return _out
         return "未找到相关搜索结果"
     except Exception as e:
         return f"搜索出错：{str(e)}"
@@ -849,8 +932,8 @@ ENABLE_VOICE = True             # 语音转文字总开关：false=不处理群�
 
 # ===================== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====================
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
-MERGE_WAIT_SECONDS = 8              # 等待窗口（秒）：N秒内无新消息才处理
-MERGE_MAX_COUNT = 8                 # 超过多少条直接处理（防刷屏）
+MERGE_WAIT_SECONDS = 20             # 合并窗口（秒）：N秒内无新消息才处理（真人也不会秒回，拉长些让大家充分发完，防止多人@时漏消息）
+MERGE_MAX_COUNT = 10                # 超过多少条直接处理（防刷屏）
 _merge_buf = {}                     # chat_id -> [msg dict] 待合并缓冲
 _merge_workers = {}                 # chat_id -> asyncio.Task 每会话一个防抖worker
 _merge_last_ts = {}                 # chat_id -> 最后一条消息入缓冲的时间戳
@@ -1092,7 +1175,7 @@ def _ambient_add(chat_id, user_id, text: str):
     if AMBIENT_MSG_MAX_LEN > 0 and len(t) > AMBIENT_MSG_MAX_LEN:
         t = t[:AMBIENT_MSG_MAX_LEN] + "…"
     lst = _ambient_msgs[chat_id]
-    lst.append({"user_id": user_id, "text": t})
+    lst.append({"user_id": user_id, "text": t, "ts": time.time()})
     while AMBIENT_MAX_MSGS > 0 and len(lst) > AMBIENT_MAX_MSGS:
         lst.pop(0)
 
@@ -1112,16 +1195,24 @@ def _ambient_take_text(chat_id) -> str:
             "不要专门回应或复述它们，也不要因此改变你的回复对象，注意每条前面的时间）】\n" + body)
 
 
-def _ambient_peek(chat_id, limit: int = 5) -> list:
-    """只看旁听缓存不删除，返回最近N条的文本列表（用于自由聊天判断）"""
+def _ambient_peek(chat_id, limit: int = 5, drop_last: int = 0) -> list:
+    """只看旁听缓存不删除，返回最近N条文本（用于自由聊天判断）。
+    drop_last：丢弃末尾几条（当前待判断消息刚被加进缓存时，用drop_last=1避免重复）。"""
     lst = _ambient_msgs.get(chat_id, [])
     if not lst:
         return []
+    if drop_last:
+        lst = lst[:-drop_last] if len(lst) > drop_last else []
     import datetime
     lines = []
     for x in lst[-limit:]:
         _t = datetime.datetime.fromtimestamp(x.get("ts", time.time())).strftime("%H:%M")
-        lines.append(f"[{_t}] {x['text']}")
+        _uid = x.get("user_id")
+        _nm = str(_uid)
+        if chat_id in _group_members_cache:
+            _i = _group_members_cache[chat_id].get(_uid, {})
+            _nm = _i.get("card") or _i.get("nickname") or str(_uid)
+        lines.append(f"[{_t}] {_nm}：{x['text']}")
     return lines
 
 
@@ -1187,6 +1278,42 @@ def extract_user_text(cq_msg: str, self_id: int, raw_msg: str = "") -> str:
         idx = text.find(" ")
         text = text[idx:].strip() if idx > 0 else ""
     return text.strip()
+
+
+def extract_ambient_text(cq_msg: str, self_id: int, group_id: int, raw_msg: str = "") -> str:
+    """旁听/自由聊天判断专用：与 extract_user_text 不同，这里【保留@别人和回复关系】。
+    否则判断AI看到的是没主语的“没手机版的吗？”，不知道对方其实在@别人，容易误插嘴。
+    @机器人去掉；@别人转成 @昵称；回复标记成（回复@某人）；图片/表情等其余CQ码删掉。"""
+    text = cq_msg.replace(f"[CQ:at,qq={self_id}]", "")
+    if raw_msg:
+        text = text.replace(f"@{self_id}", "")
+
+    def _at_name(qq_str):
+        if qq_str == "all":
+            return "@全体成员"
+        try:
+            uid = int(qq_str)
+        except (TypeError, ValueError):
+            return f"@{qq_str}"
+        if uid == self_id:
+            return ""
+        mem = _group_members_cache.get(group_id, {}).get(uid, {}) if group_id is not None else {}
+        return "@" + (mem.get("card") or mem.get("nickname") or str(uid))
+
+    # @别人 → @昵称（含@全体）
+    text = re.sub(r"\[CQ:at,qq=(\d+|all)\]", lambda m: _at_name(m.group(1)) + " ", text)
+    # 回复关系：NapCat reply 可能带 qq=被回复者，带则点名，否则标“回复上一条”
+    def _reply_tag(m):
+        qq = m.group(1)
+        if qq and qq != "0":
+            _nm = _at_name(qq)
+            return f"（回复{_nm}） " if _nm else "（回复上一条） "
+        return "（回复上一条） "
+    text = re.sub(r"\[CQ:reply,id=\d+(?:,qq=(\d+|all))?\]", _reply_tag, text)
+    # 其余CQ码（图片/表情/语音/视频等）删掉
+    text = re.sub(r"\[CQ:[^]]*\]", "", text)
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    return text
 
 
 def is_controller_command(text: str) -> bool:
@@ -2187,17 +2314,52 @@ async def handle_qishui_download(websocket, chat_id, is_group, raw_link):
             if os.path.isfile(exist_path) and os.path.getsize(exist_path) > 1024:
                 print(f"🎵 {safe_name}{ext} 已存在，直接发送")
                 return exist_path, None
-        # 1. 下载原始音频
-        try:
-            res = requests.get(audio_url, headers=headers, timeout=90, stream=True)
-            if res.status_code != 200:
-                return None, f"音频下载失败，状态码：{res.status_code}"
-            with open(temp_path, "wb") as f:
-                for chunk in res.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-        except Exception as e:
-            return None, f"音频下载异常：{e}"
+        # 1. 下载原始音频（字节CDN会间歇性掐SSL连接/直链过期，重试3次，最后一次前重新解析拿新直链）
+        dl_headers = dict(headers)
+        dl_headers.setdefault("Accept", "*/*")
+        dl_headers.setdefault("Accept-Language", "zh-CN,zh;q=0.9")
+        dl_url = audio_url
+        max_attempts = 3
+        downloaded = False
+        last_err = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                res = requests.get(dl_url, headers=dl_headers, timeout=90, stream=True)
+                if res.status_code != 200:
+                    raise IOError(f"状态码：{res.status_code}")
+                with open(temp_path, "wb") as f:
+                    for chunk in res.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                if os.path.getsize(temp_path) < 1024:
+                    raise IOError("下载文件过小，可能被CDN拦截")
+                downloaded = True
+                break
+            except Exception as e:
+                last_err = str(e)
+                print(f"🎵 音频下载第{attempt}/{max_attempts}次失败：{last_err}")
+                if os.path.isfile(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                if attempt < max_attempts:
+                    # 最后一次重试前重新解析，拿新鲜直链（旧链接签名可能已过期）
+                    if attempt == max_attempts - 1:
+                        try:
+                            print("🎵 重新解析获取新直链...")
+                            _r = qishui_parse(raw_link)
+                            if not _r[5] and _r[2]:
+                                dl_url = _r[2]
+                                dl_headers = dict(_r[4])
+                                dl_headers.setdefault("Accept", "*/*")
+                        except Exception:
+                            pass
+                    wait = 2 * attempt
+                    print(f"🎵 {wait}秒后重试...")
+                    time.sleep(wait)
+        if not downloaded:
+            return None, f"音频下载异常（已重试{max_attempts}次）：{last_err}"
         # 2. 格式处理：有ffmpeg转320k MP3，无ffmpeg保留原始m4a
         use_ffmpeg = _check_ffmpeg()
         if use_ffmpeg:
@@ -2525,7 +2687,7 @@ def _strip_dsml_tags(text: str) -> str:
 
 # ===================== 永久记忆存档（memory.json） =====================
 class MemoryStore:
-    """持久化记忆：chat_context(各群最近N轮上下文) + members(成员档案/印象值) + global_notes(全局备忘)。
+    """持久化记忆：chat_context(各群最近N轮上下文) + members(成员档案) + global_notes(全局备忘)。
     原子写（先写.tmp再os.replace），防止写坏存档；用户也可直接用记事本编辑memory.json。"""
 
     def __init__(self, path: str):
@@ -2542,6 +2704,14 @@ class MemoryStore:
                     self.data["chat_context"] = loaded["chat_context"]
                 if isinstance(loaded.get("members"), dict):
                     self.data["members"] = loaded["members"]
+                    _fav = 0
+                    for _m in self.data["members"].values():
+                        if isinstance(_m, dict) and "favor" in _m:
+                            _m.pop("favor", None)
+                            _fav += 1
+                    if _fav:
+                        print(f"🧹 已清除{_fav}个成员档案里废弃的印象值(favor)字段")
+                        self.save()  # 落盘，确保磁盘文件里的favor也被清掉
                 if isinstance(loaded.get("global_notes"), list):
                     self.data["global_notes"] = loaded["global_notes"]
                 print(f"🧠 永久记忆已加载：{len(self.data['members'])}个成员档案，"
@@ -2570,7 +2740,7 @@ class MemoryStore:
         self.data.setdefault("chat_context", {})[str(chat_key)] = list(history)[-limit:]
         self.save()
 
-    # ---------- 成员档案 / 印象值 ----------
+    # ---------- 成员档案 ----------
     def _ensure_note_lists(self, m: dict) -> None:
         """把旧的字符串note字段转成列表结构（兼容历史数据）。"""
         if "public_notes" not in m:
@@ -2581,30 +2751,25 @@ class MemoryStore:
             m["private_notes"] = [old[:80]] if old else []
 
     def _append_note(self, notes: list, text: str, max_items: int = 5, max_len: int = 60) -> bool:
-        """追加一条note（去重、限条数），返回是否新增。"""
-        t = text.strip()[:max_len]
-        if not t:
+        """追加一条note（自动带[MM-DD]日期、按内容去重、限条数），返回是否新增。"""
+        body = text.strip()
+        if not body:
             return False
-        # 去重：已包含相同或高度相似的就不加
+        body = body[:max_len]
+        # 按纯内容去重（不受日期前缀影响）
         for n in notes:
-            if t in n or n in t:
+            if body in n:
                 return False
-        notes.append(t)
+        notes.append(f"[{time.strftime('%m-%d')}] {body}")
         while len(notes) > max_items:
             notes.pop(0)  # 删最老的
         return True
 
-    def update_member(self, qq, favor_delta: int, nickname: str = "", note: str = "") -> dict:
+    def update_member(self, qq, nickname: str = "", note: str = "") -> dict:
         key = str(qq)
         members = self.data.setdefault("members", {})
-        m = members.setdefault(key, {"nickname": "", "favor": 50, "note": "", "public_note": "", "private_note": "", "public_notes": [], "private_notes": []})
+        m = members.setdefault(key, {"nickname": "", "note": "", "public_note": "", "private_note": "", "public_notes": [], "private_notes": []})
         self._ensure_note_lists(m)
-        try:
-            delta = int(favor_delta)
-        except Exception:
-            delta = 0
-        delta = max(-1, min(1, delta))
-        m["favor"] = max(0, min(100, int(m.get("favor", 50)) + delta))
         if nickname and str(nickname).strip():
             m["nickname"] = str(nickname).strip()[:20]
         if note and str(note).strip():
@@ -2619,7 +2784,7 @@ class MemoryStore:
         """私聊私密记忆：只在私聊场景注入，群聊不可见。列表式追加。"""
         key = str(qq)
         members = self.data.setdefault("members", {})
-        m = members.setdefault(key, {"nickname": "", "favor": 50, "note": "", "public_note": "", "private_note": "", "public_notes": [], "private_notes": []})
+        m = members.setdefault(key, {"nickname": "", "note": "", "public_note": "", "private_note": "", "public_notes": [], "private_notes": []})
         self._ensure_note_lists(m)
         if private_note and str(private_note).strip():
             self._append_note(m["private_notes"], private_note, max_items=5, max_len=80)
@@ -2654,7 +2819,11 @@ class MemoryStore:
         if not note:
             return
         notes = self.data.setdefault("global_notes", [])
-        notes.append(note[:200])
+        body = note[:200]
+        # 按内容去重（不受日期影响）
+        if any(body in (n or "") for n in notes):
+            return
+        notes.append(f"[{time.strftime('%m-%d')}] {body}")
         if len(notes) > 30:  # 最多保留30条，防止无限膨胀烧token
             del notes[:-30]
         self.save()
@@ -2673,15 +2842,6 @@ class MemoryStore:
         if removed:
             self.save()
         return removed
-
-
-def _impression_level(impression: int) -> str:
-    """印象值数值转文字描述，让AI理解自己当前对该成员的整体印象"""
-    if impression <= 20: return "印象很差"
-    if impression <= 40: return "印象较差"
-    if impression <= 60: return "印象一般"
-    if impression <= 80: return "印象较好"
-    return "印象很好"
 
 
 def _build_memory_block(member_key, is_private: bool = False) -> str:
@@ -2740,12 +2900,6 @@ def _memory_tool_defs(is_group: bool = True) -> list:
         }
     }
     required = ["qq", "note"]
-    if ENABLE_FAVOR:
-        update_props["favor_delta"] = {
-            "type": "integer", "enum": [-1, 0, 1],
-            "description": "印象值微调：愉快/被帮忙→1，被冒犯/不愉快→-1，一般→0"
-        }
-        required.append("favor_delta")
     tools.append({
         "type": "function",
         "function": {
@@ -2875,7 +3029,7 @@ def _execute_memory_tool(tool_name: str, arguments: dict, member_key: str = "", 
             removed = memory_store.forget_member_info(_key, kw)
             added = False
             if new_note:
-                memory_store.update_member(_key, 0, "", new_note)
+                memory_store.update_member(_key, "", new_note)
                 added = True
             _r = f"已删除{removed}条旧记忆" if removed else "没找到要删的旧记忆"
             if added:
@@ -2886,14 +3040,12 @@ def _execute_memory_tool(tool_name: str, arguments: dict, member_key: str = "", 
             qq = str(arguments.get("qq", "")).strip()
             if not qq.isdigit():
                 return "update_member失败：qq必须是数字QQ号。"
-            _delta = int(arguments.get("favor_delta", 0) or 0) if ENABLE_FAVOR else 0
             _key = member_key if member_key else qq
             m = memory_store.update_member(
-                _key, _delta,
+                _key,
                 str(arguments.get("nickname", "")), str(arguments.get("note", ""))
             )
-            _extra = f"，印象值→{m['favor']}" if ENABLE_FAVOR else ""
-            print(f"🧠 更新成员{qq}长期信息{_extra}"
+            print(f"🧠 更新成员{qq}长期信息"
                   f"{'，备注：'+m['note'] if m.get('note') else ''}")
             return "已更新该成员的长期信息。请正常给出你的回复。"
         if tool_name == "remember_note":
@@ -3039,7 +3191,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "搜索关键词，要简洁准确"
+                            "description": "搜索关键词：要具体、完整、带明确目标，写清主体名称+要查的具体内容（如：我的世界MITE贝爷生存 振金装备怎么合成 需要什么材料），不要只给一个宽泛名词，也不要写成口语整句；换不同角度可分多次搜索。"
                         }
                     },
                     "required": ["query"]
@@ -3333,7 +3485,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "搜索关键词，要简洁准确"
+                            "description": "搜索关键词：要具体、完整、带明确目标，写清主体名称+要查的具体内容（如：我的世界MITE贝爷生存 振金装备怎么合成 需要什么材料），不要只给一个宽泛名词，也不要写成口语整句；换不同角度可分多次搜索。"
                         }
                     },
                     "required": ["query"]
@@ -3584,6 +3736,8 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
     # 把被回复消息的内容加到用户问题里
     if reply_text:
         user_text += reply_text
+    # 纯视频/语音消息（用户没打字）追加转写后开头会残留空行，统一清理
+    user_text = user_text.strip()
 
     if not user_text:
         # 只@没有文字时，传简单标识，AI自己知道怎么回；私聊空消息单独处理
@@ -3601,8 +3755,10 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
                     _g_hist = group_history[_gkey][-6:]
                     _g_lines = []
                     for _gm in _g_hist:
-                        _role = "群成员" if _gm.get("role") == "user" else "你在群里"
-                        _g_lines.append(f"{_role}：{_gm.get('content','')[:150]}")
+                        if _gm.get("role") == "user":
+                            _g_lines.append(_gm.get('content', '')[:150])  # 群友历史已自带[时间][QQ号]前缀
+                        else:
+                            _g_lines.append("你在群里：" + _gm.get('content', '')[:150])
                     if _g_lines:
                         his = [{"role": "system", "content": "【群里最近聊的（你能看到群聊，但群聊不知道私聊内容）】\n" + "\n".join(_g_lines)}] + his
                     break
@@ -3628,8 +3784,8 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
     except Exception as _e:
         print(f"❌ AI调用异常（本条消息跳过，连接保持）：{_e}")
         return
-    # 更新上下文
-    his.append({"role": "user", "content": user_text})
+    # 更新上下文（user消息带[时间][QQ号]前缀，与发给API的当前消息格式一致；历史也能区分发言人和时间）
+    his.append({"role": "user", "content": f"[{_format_now()}][QQ号:{user_id}] {user_text}"})
     his.append({"role": "assistant", "content": reply})
     # 控制上下文长度
     if len(his) > MAX_CONTEXT_LEN * 2:
@@ -3655,10 +3811,11 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
         await asyncio.sleep(0.8)  # 与文字回复稍微错开，更像真人
         await send_emoji_image(ws, chat_id, is_group, _emo)
 
-    # 对话延续：刚回复完一轮，下一条群消息100%触发自由聊天判断（仅群聊回复后生效，私聊不影响群聊）
+    # 对话延续：AI正常回复一轮后，接下来 N 条群消息都100%进入接话判断（仅群聊，私聊不影响群聊）
     if is_group:
-        global _random_follow_up
-        _random_follow_up = True
+        global _random_follow_up_count, _random_followup_ts
+        _random_follow_up_count = FOLLOW_UP_TRIGGER_COUNT
+        _random_followup_ts = time.time()
 
 
 async def _merge_worker(ws, chat_id, is_group):
@@ -3698,7 +3855,7 @@ async def _merge_worker(ws, chat_id, is_group):
                     _lines = []
                     for _m in msgs:
                         _t = (_m["user_text"] or "").strip() or "（空消息）"
-                        _lines.append(f"{_m['nickname']}：{_t}")
+                        _lines.append(f"[QQ号:{_m['user_id']}]{_m['nickname']}：{_t}")
                     user_text = f"（群里连续{len(msgs)}条消息，分别来自不同的人，请一并回复）\n" + "\n".join(_lines)
                     display_text = " | ".join(f"{_m['nickname']}：{_m['display_text']}" for _m in msgs)
                     reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
@@ -3739,7 +3896,7 @@ async def main():
                 if isinstance(_v, list) and _v:
                     group_history[_k] = _v
                     _restored += 1
-            print(f"🧠 永久记忆已开启：恢复{_restored}个会话的最近{MEMORY_CONTEXT_TURNS}轮上下文，AI可自主更新成员印象值/备忘")
+            print(f"🧠 永久记忆已开启：恢复{_restored}个会话的最近{MEMORY_CONTEXT_TURNS}轮上下文，AI可自主更新成员档案/备忘")
         else:
             print("🧠 永久记忆已关闭")
         print(f"🧠 对话模型思考模式：{'开启(' + REASONING_EFFORT + ')' if ENABLE_THINKING_CHAT else '关闭'}")
@@ -3783,7 +3940,7 @@ async def main():
         asyncio.create_task(_delayed_fetch_members())
         asyncio.create_task(_group_members_refresh_loop(ws))
         print("👥 群成员自动获取已开启（启动拉取+每小时刷新）")
-        print(f"💬 自由聊天：开关={'开' if ENABLE_RANDOM_CHAT else '关'}，触发概率={CHAT_TRIGGER_PROBABILITY:.0%}")
+        print(f"💬 自由聊天：开关={'开' if ENABLE_RANDOM_CHAT else '关'}，触发概率={CHAT_TRIGGER_PROBABILITY:.0%}，回复后延续{FOLLOW_UP_TRIGGER_COUNT}条")
 
         # 启动清理：只删自己遗留的待传临时文件（只跑一次，重连不重复）
         if delivery_mode() != "native":
@@ -4092,22 +4249,32 @@ async def main():
                     if not at_flag:
                         # 没@机器人：先记进旁听缓存
                         if user_id != self_id:
-                            _amb_text = extract_user_text(cq_msg, self_id, raw_msg)
+                            _amb_text = extract_ambient_text(cq_msg, self_id, chat_id, raw_msg)
                             if _amb_text:
                                 _ambient_add(chat_id, user_id, _amb_text)
                         # 自由聊天：按概率触发AI判断要不要接话
                         _random_triggered = False
-                        if ENABLE_RANDOM_CHAT and user_id != self_id and _amb_text:
-                            global _random_follow_up
-                            # 刚回复完一轮→下一条100%触发；否则按配置概率（默认15%）
-                            _trigger = _random_follow_up or (random.random() < CHAT_TRIGGER_PROBABILITY)
+                        # 已有一拨消息在合并窗口攒着（worker在跑且缓冲非空）→ 本条直接并入，不再重复判断（避免连续消息每条都调一次判断API）
+                        _w = _merge_workers.get(chat_id)
+                        if _w is not None and not _w.done() and _merge_buf.get(chat_id):
+                            _random_triggered = True
+                            user_text = _amb_text
+                        elif ENABLE_RANDOM_CHAT and user_id != self_id and _amb_text:
+                            global _random_follow_up_count, _random_followup_ts
+                            # 延续窗口有时效：超过FOLLOW_UP_WINDOW_SECONDS没消息则作废，回到概率判断（防止一晚上后还在等昨天的回复）
+                            if _random_follow_up_count > 0 and FOLLOW_UP_WINDOW_SECONDS > 0 and (time.time() - _random_followup_ts) > FOLLOW_UP_WINDOW_SECONDS:
+                                _random_follow_up_count = 0
+                            # 对话延续期内（回复后N条）→100%进入判断并消耗1条；用完后按配置概率
+                            if _random_follow_up_count > 0:
+                                _trigger = True
+                                _random_follow_up_count -= 1
+                            else:
+                                _trigger = random.random() < CHAT_TRIGGER_PROBABILITY
                             if _trigger:
                                 _should = await _should_reply_random(ws, chat_id, user_id, _amb_text)
                                 if _should:
                                     _random_triggered = True
                                     user_text = _amb_text
-                                # 判断完重置延续标记（不管接不接话，下一条恢复正常概率）
-                                _random_follow_up = False
                             # 判断不回复就静默（不清理缓存，跟没发生一样）
                         if not _random_triggered:
                             continue
@@ -4203,7 +4370,7 @@ async def main():
                         lines = ["===== 永久记忆存档 ====="]
                         m = memory_store.data.get("members", {}).get(str(user_id))
                         if m:
-                            # 印象值不外显（用户要求：不要把印象值往群里说），这里只展示昵称/印象
+                            # 成员档案只展示昵称/备注，不外显内部字段
                             if m.get("nickname"):
                                 lines.append(f"昵称：{m['nickname']}")
                             if m.get("note"):
@@ -4332,11 +4499,11 @@ def _load_config_file():
     global ENABLE_THINKING_CHAT, ENABLE_THINKING_VISION, REASONING_EFFORT
     global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX
     global ENABLE_SPLIT_REPLY, SPLIT_DELAY_MIN, SPLIT_DELAY_MAX, SPLIT_MAX_PARTS, SPLIT_PART_MAX_LEN
-    global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY
+    global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY, FOLLOW_UP_TRIGGER_COUNT, FOLLOW_UP_WINDOW_SECONDS
     global PEAK_PERIOD_NAME, OFFPEAK_PERIOD_NAME
     global ENABLE_MEMORY, MEMORY_CONTEXT_TURNS, MEMORY_FILE, memory_store
     global MEMORY_INJECT_PROMPT
-    global ENABLE_FAVOR, ENABLE_AMBIENT_CACHE, AMBIENT_MAX_MSGS, AMBIENT_MSG_MAX_LEN
+    global ENABLE_AMBIENT_CACHE, AMBIENT_MAX_MSGS, AMBIENT_MSG_MAX_LEN
     global ENABLE_EMOJI, EMOJI_DIR, EMOJI_MAP
     global ENABLE_VIDEO, ENABLE_VOICE
     global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT
@@ -4389,6 +4556,10 @@ def _load_config_file():
     CHAT_TRIGGER_PROBABILITY = f("chat_trigger_probability", CHAT_TRIGGER_PROBABILITY)
     if CHAT_TRIGGER_PROBABILITY < 0: CHAT_TRIGGER_PROBABILITY = 0
     if CHAT_TRIGGER_PROBABILITY > 1: CHAT_TRIGGER_PROBABILITY = 1
+    FOLLOW_UP_TRIGGER_COUNT = i("follow_up_trigger_count", FOLLOW_UP_TRIGGER_COUNT)
+    if FOLLOW_UP_TRIGGER_COUNT < 0: FOLLOW_UP_TRIGGER_COUNT = 0
+    FOLLOW_UP_WINDOW_SECONDS = i("follow_up_window_seconds", FOLLOW_UP_WINDOW_SECONDS)
+    if FOLLOW_UP_WINDOW_SECONDS < 0: FOLLOW_UP_WINDOW_SECONDS = 0
     # 峰谷时段自定义显示名（如高峰="梁文峰"、空闲="梁文谷"；留空则用默认"高峰"/"空闲"）
     _peak_name = s("peak_period_name", PEAK_PERIOD_NAME)
     _offpeak_name = s("offpeak_period_name", OFFPEAK_PERIOD_NAME)
@@ -4410,11 +4581,9 @@ def _load_config_file():
             print(f"⚠️ 永久记忆初始化失败，本次运行不使用记忆：{e}")
             memory_store = None
 
-    # 记忆注入system提示词开关（false=只记录存档+恢复上下文，完全不往人格提示词里塞成员档案/印象值/备忘，避免记忆把AI性格带偏）
+    # 记忆注入system提示词开关（false=只记录存档+恢复上下文，完全不往人格提示词里塞成员档案/备忘，避免记忆把AI性格带偏）
     MEMORY_INJECT_PROMPT = b("memory_inject_prompt", MEMORY_INJECT_PROMPT)
 
-    # 印象值开关（false=不注入印象值、也不允许AI改印象值）
-    ENABLE_FAVOR = b("enable_favor", ENABLE_FAVOR)
     # 群聊旁听缓存：没@机器人的群消息也存起来当上下文
     ENABLE_AMBIENT_CACHE = b("enable_ambient_cache", ENABLE_AMBIENT_CACHE)
     AMBIENT_MAX_MSGS = i("ambient_max_msgs", AMBIENT_MAX_MSGS)
@@ -4456,6 +4625,8 @@ def _load_config_file():
             print(f"🎙️ AI回复转语音已开启：火山引擎 音色={VOLC_VOICE}")
         else:
             print(f"🎙️ AI回复转语音已开启：edge-tts 音色={TTS_VOICE}")
+    ENABLE_MERGE = b("enable_message_merge", ENABLE_MERGE)
+    MERGE_WAIT_SECONDS = i("merge_wait_seconds", MERGE_WAIT_SECONDS)
     MERGE_MAX_COUNT = i("merge_max_count", MERGE_MAX_COUNT)
     if MERGE_WAIT_SECONDS < 1: MERGE_WAIT_SECONDS = 1
     if MERGE_MAX_COUNT < 1: MERGE_MAX_COUNT = 1
