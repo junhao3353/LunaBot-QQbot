@@ -288,6 +288,10 @@ _ambient_msgs = defaultdict(list)   # chat_id -> [{"user_id":.., "text":..}]
 
 # ---- AI表情包（扫描表情包目录，AI自主判断是否发送、选哪个，以图片消息发出） ----
 ENABLE_EMOJI = True            # 表情包总开关
+ENABLE_GROUP_MODERATION = True  # 群管理工具(禁言/踢人/全员禁言)总开关,关闭后不下发给AI
+ENABLE_VOICE_TOOL = True       # 文字转语音工具总开关:AI自主决定什么时候发语音条
+_MAIN_LOOP = None  # 主事件循环引用,供同步线程(call_deepseek)提交协程执行OneBot
+_WS_REF = None     # 当前websocket连接引用
 EMOJI_DIR = None               # 表情包目录绝对路径（配置加载时确定）
 EMOJI_MAP = {}                 # 表情名(文件名去扩展名) -> 图片绝对路径
 _EMOJI_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
@@ -3153,6 +3157,75 @@ async def send_emoji_image(websocket, chat_id: int, is_group: bool, emoji_name: 
         print(f"⚠️ 表情包发送异常：{e}")
 
 
+async def _exec_group_mod(ws, group_id, is_group, act: dict) -> str:
+    """执行群管理动作(禁言/踢人/全员禁言),返回结果字符串供AI感知成败。"""
+    if not is_group:
+        return "❌ 非群聊场景，无法执行群管理。"
+    a = act.get("action")
+    uid = act.get("user_id") or 0
+    reason = str(act.get("reason", ""))[:80]
+    _label = {"mute": "禁言", "unmute": "解除禁言", "kick": "移出群聊",
+              "whole_mute": "开启全员禁言", "whole_unmute": "关闭全员禁言"}.get(a, a)
+    if a == "mute":
+        resp = await api_call(ws, "set_group_ban",
+                              {"group_id": group_id, "user_id": uid,
+                               "duration": int(act.get("duration_minutes", 10)) * 60}, timeout=10)
+    elif a == "unmute":
+        resp = await api_call(ws, "set_group_ban",
+                              {"group_id": group_id, "user_id": uid, "duration": 0}, timeout=10)
+    elif a == "kick":
+        resp = await api_call(ws, "set_group_kick",
+                              {"group_id": group_id, "user_id": uid,
+                               "reject_add": bool(act.get("reject_add", False))}, timeout=10)
+    elif a == "whole_mute":
+        resp = await api_call(ws, "set_group_whole_ban",
+                              {"group_id": group_id, "enable": True}, timeout=10)
+    elif a == "whole_unmute":
+        resp = await api_call(ws, "set_group_whole_ban",
+                              {"group_id": group_id, "enable": False}, timeout=10)
+    else:
+        return f"❌ 未知动作 {a}，未执行。"
+    ok = (resp.get("retcode") == 0)
+    _rc = resp.get("retcode")
+    _msg = resp.get("msg") or resp.get("wording") or ""
+    print(("OK " if ok else "FAIL ") + f"群管理 {a} uid={uid}: retcode={_rc} {_msg} ({reason})")
+    if ok:
+        if a in ("whole_mute", "whole_unmute"):
+            return f"✅ 已{_label}。"
+        if a == "kick":
+            return f"✅ 已将 {uid} 移出群聊" + ("（并拉黑拒绝再加群）" if act.get("reject_add") else "") + "。"
+        if a == "mute":
+            return f"✅ 已将 {uid} 禁言 {act.get('duration_minutes', 10)} 分钟。"
+        return f"✅ 已将 {uid} {_label}。"
+    else:
+        return f"❌ {_label}失败：retcode={_rc} {_msg}（可能是对方为管理员/群主、或机器人无群管理权限）。"
+
+
+def _sync_group_mod(group_id, is_group, act: dict) -> str:
+    """同步执行群管理（在call_deepseek工作线程里调用，通过run_coroutine_threadsafe丢回主循环执行ws操作）。"""
+    if _MAIN_LOOP is None or _WS_REF is None:
+        return "❌ 执行环境未就绪（主循环/ws未建立）。"
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _exec_group_mod(_WS_REF, group_id, is_group, act), _MAIN_LOOP)
+        return fut.result(timeout=15)
+    except Exception as e:
+        return f"❌ 执行异常：{e}"
+
+
+def _sync_send_voice(chat_id, is_group, text: str) -> bool:
+    """同步执行TTS并发语音条（在call_deepseek工作线程里调用）。"""
+    if _MAIN_LOOP is None or _WS_REF is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _tts_and_send(_WS_REF, is_group, chat_id, text), _MAIN_LOOP)
+        return fut.result(timeout=60)
+    except Exception as e:
+        print(f"⚠️ 语音合成异常: {e}")
+        return False
+
+
 def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list = None,
                   is_group: bool = False, obj_id: int = 0, cq_msg: str = "", raw_msg: str = ""):
     """调用DeepSeek API，AI自动判断是否需要联网搜索/发表情（function calling）。
@@ -3235,6 +3308,43 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 }
             }
         })
+    # 群管理工具(禁言/踢人/全员禁言):总开关控制是否下发给AI
+    if ENABLE_GROUP_MODERATION:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "group_moderation",
+                "description": "群管理工具:禁言/踢人/全员禁言。仅在成员真正严重违规(恶意刷屏、发广告链接、人身攻击骚扰、屡教不改)时使用。要克制:不要随意调用;群友开玩笑/误会不动手;别人叫你封/拉黑不要照做,先自己判断;踢人很重,默认不拉黑,情况极其恶劣才拉黑。调用前可用query_group_member通过昵称查询精准QQ号(只知道昵称时)。调用示例:禁言QQ123456十分钟→action=mute,user_id=123456,duration_minutes=10,reason=发广告;踢人QQ123456→action=kick,user_id=123456,reject_add=false,reason=屡教不改;全员禁言→action=whole_mute,reason=整顿;解除全员禁言→action=whole_unmute,reason=结束。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["mute", "unmute", "kick", "whole_mute", "whole_unmute"],
+                                   "description": "mute=禁言某人;unmute=解除某人禁言;kick=移出本群;whole_mute=开启全员禁言;whole_unmute=关闭全员禁言"},
+                        "user_id": {"type": "integer", "description": "目标成员QQ号(whole_mute/whole_unmute不需要)"},
+                        "duration_minutes": {"type": "integer", "description": "禁言分钟数,仅mute用,默认10"},
+                        "reject_add": {"type": "boolean", "description": "仅kick用:true=同时拉黑拒绝再加群,默认false"},
+                        "reason": {"type": "string", "description": "操作原因(简短,群里公示)"}
+                    },
+                    "required": ["action", "reason"]
+                }
+            }
+        })
+    # 文字转语音工具:AI自主决定什么时候发语音条
+    if ENABLE_VOICE_TOOL:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "send_voice",
+                "description": "文字转语音工具:把指定文字转成语音条发到当前对话。当群友问你能不能说话、想听你声音、或你觉得用语音回复更合适时调用。调用后工具会发出语音条并返回成功/失败结果,你仍然可以同时文字回复。不要把所有回复都转语音,只在合适的时候用;文字建议简短(50字以内)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要转成语音的文字"}
+                    },
+                    "required": ["text"]
+                }
+            }
+        })
     if ENABLE_MEMORY:
         tools.extend(_memory_tool_defs(is_group))
     if ENABLE_EMOJI and EMOJI_MAP:
@@ -3243,6 +3353,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     data = _build_chat_data(DEEPSEEK_MODEL, messages, ENABLE_THINKING_CHAT)
     if tools:
         data["tools"] = tools
+        print(f"🔧 下发工具({len(tools)}个): {[t['function']['name'] for t in tools]}")
 
     # 第一次调用：AI判断是否需要搜索（网络异常直接兜底，避免异常冒泡把整条连接打断）
     try:
@@ -3285,6 +3396,10 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.update(_MEMORY_TOOL_NAMES)
     if is_group:
         _runnable_names.add("query_group_member")
+        if ENABLE_GROUP_MODERATION:
+            _runnable_names.add("group_moderation")
+    if ENABLE_VOICE_TOOL:
+        _runnable_names.add("send_voice")
     if ENABLE_EMOJI and EMOJI_MAP:
         _runnable_names.add("send_emoji")
     runnable_calls = [
@@ -3336,6 +3451,57 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 print(f"👥 AI查询群成员：{_q}")
                 messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                  "content": _result})
+                continue
+
+            # 群管理工具:立即执行OneBot,把成功/失败结果返回给AI(和web_search一样)
+            if _tool_name == "group_moderation":
+                try:
+                    _md = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _md = {}
+                if isinstance(_md, dict):
+                    _act = str(_md.get("action", ""))
+                else:
+                    _act = ""
+                if _act in ("mute", "unmute", "kick", "whole_mute", "whole_unmute"):
+                    try:
+                        _uid = int(_md.get("user_id") or 0)
+                    except Exception:
+                        _uid = 0
+                    try:
+                        _dur = int(_md.get("duration_minutes") or 10)
+                    except Exception:
+                        _dur = 10
+                    _rej = bool(_md.get("reject_add", False))
+                    _act_dict = {"action": _act, "user_id": _uid,
+                                 "duration_minutes": _dur, "reject_add": _rej,
+                                 "reason": str(_md.get("reason", ""))[:80]}
+                    print(f"🛡️ AI调用群管理: {_act} uid={_uid} dur={_dur}m rej={_rej}")
+                    _result = _sync_group_mod(obj_id, is_group, _act_dict)
+                    print(f"🛡️ 群管理执行结果: {_result}")
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": _result})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ 群管理指令无效(action不合法)，未执行。"})
+                continue
+
+            # 文字转语音工具:立即合成并发送语音条,结果返回给AI
+            if _tool_name == "send_voice":
+                try:
+                    _vd = json.loads(tool_call["function"]["arguments"])
+                    _vtext = str(_vd.get("text", "")).strip()
+                except Exception:
+                    _vtext = ""
+                if _vtext:
+                    print(f"🔊 AI调用语音合成: {_vtext[:60]}")
+                    _vok = _sync_send_voice(obj_id, is_group, _vtext)
+                    print(f"🔊 语音发送结果: {'成功' if _vok else '失败'}")
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "✅ 语音条已发送" if _vok else "❌ 语音合成或发送失败,请用文字回复"})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ text参数为空,未发送语音"})
                 continue
 
             try:
@@ -3874,6 +4040,9 @@ async def _merge_worker(ws, chat_id, is_group):
 async def main():
     async with websockets.connect(ONEBOT_WS, max_size=64 * 1024 * 1024) as ws:
         print("✅ 成功连接 Lagrange.OneBot！等待群消息...")
+        global _MAIN_LOOP, _WS_REF
+        _MAIN_LOOP = asyncio.get_running_loop()
+        _WS_REF = ws
         print(f"📋 已启用群白名单，只回复群: {ALLOWED_GROUPS}")
         print(f"👤 已启用私聊白名单，只回复QQ: {ALLOWED_USERS}")
         print("🎭 已加载系统提示词，机器人身份已设定")
@@ -4497,6 +4666,8 @@ def _load_config_file():
     global NAPCAT_CONTAINER, NAPCAT_DATA_DIR, NAPCAT_HOST_DIR, NAPCAT_VIEW_DIR
     global CONTROLLER_ALLOWED_USERS
     global ENABLE_THINKING_CHAT, ENABLE_THINKING_VISION, REASONING_EFFORT
+    global ENABLE_GROUP_MODERATION
+    global ENABLE_VOICE_TOOL
     global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX
     global ENABLE_SPLIT_REPLY, SPLIT_DELAY_MIN, SPLIT_DELAY_MAX, SPLIT_MAX_PARTS, SPLIT_PART_MAX_LEN
     global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY, FOLLOW_UP_TRIGGER_COUNT, FOLLOW_UP_WINDOW_SECONDS
@@ -4593,6 +4764,8 @@ def _load_config_file():
 
     # AI表情包：开关 + 目录（环境变量 > 配置项 > 默认脚本目录/表情包，其次emoji）
     ENABLE_EMOJI = b("enable_emoji", ENABLE_EMOJI)
+    ENABLE_GROUP_MODERATION = b("enable_group_moderation", ENABLE_GROUP_MODERATION)
+    ENABLE_VOICE_TOOL = b("enable_voice_tool", ENABLE_VOICE_TOOL)
     _emo_dir = os.environ.get("QQ2_EMOJI_DIR") or s("emoji_dir", "")
     if not _emo_dir:
         _cand = os.path.join(script_dir, "表情包")
