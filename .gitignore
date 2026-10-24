@@ -99,3 +99,7 @@ get_douyin_login_cookie.py
 # 内部文档（不给公开仓库）
 安全提交.md
 *.md.local
+
+# 本地快捷脚本（不进git）
+看bot日志.bat
+看控制器日志.bat
