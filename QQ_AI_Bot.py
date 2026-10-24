@@ -261,6 +261,31 @@ FOLLOW_UP_WINDOW_SECONDS = 180   # 延续窗口有效期（秒）：AI回复后�
 _random_follow_up_count = 0      # 对话延续剩余条数（>0时本条100%判断并-1，用完恢复概率）
 _random_followup_ts = 0.0        # 对话延续窗口设置时间戳（用于时效判断）
 
+# ---- AI主动消息：长时间没人搭理时，AI主动找话题在群里冒泡/私聊（全局单计时器） ----
+ENABLE_PROACTIVE_MSG = False       # 主动消息总开关
+ENABLE_PROACTIVE_PRIVATE = True    # 私聊主动消息开关（群聊由总开关控制，私聊单独控制）
+ENABLE_PROACTIVE_QZONE = False   # 主动发QQ空间说说开关
+PROACTIVE_IDLE_SECONDS = 3600      # 静默多久（没有任何正常API对话）后进入消息模式，默认1小时
+PROACTIVE_RANDOM_MAX = 3600        # 进入消息模式后随机延迟上限，默认0~1小时
+PROACTIVE_COOLDOWN_BASE = 5400     # 触发后冷却基础时间，默认1.5小时
+PROACTIVE_COOLDOWN_RANDOM = 5400   # 冷却额外随机上限（实际冷却=基础+0~该值），默认再加0~1.5小时
+PROACTIVE_GROUP_GIVEUP = 2         # 群连续几次主动发没人回就移出候选
+PROACTIVE_PRIVATE_GIVEUP = 1       # 私聊连续几次没回就移出候选（私聊更严格，避免查岗感）
+PROACTIVE_DEAD_SECONDS = 43200     # 死寂门槛：目标最后真人消息早于该秒数（默认12小时）则不列入候选
+PROACTIVE_ACTIVE_PROTECT = 300     # 活跃保护期：目标最后真人消息在该秒数内（默认5分钟）视为"正在聊"，不发
+# 运行时状态（不持久化，重启后重新计时）
+_pro_start_ts = time.time()
+_pro_active_state = "idle"         # idle=静默等待 / waiting=随机延迟中 / cooldown=触发后冷却
+_pro_last_api_ts = 0.0             # 最后一次正常API对话时间（全局重置点）
+_pro_next_fire = 0.0               # 下一次触发/状态切换的时间戳
+_pro_round = 0                     # 连续主动轮次（决定提示词，正常对话后归零）
+_pro_excluded_groups = set()       # 被排除的群（连续没回达到阈值）
+_pro_excluded_private = set()      # 被排除的私聊QQ
+_pro_last_human = {}               # 目标key(g群号/pQQ) -> 最后真人消息时间戳
+_pro_last_send = {}                # 目标key -> 最后一次主动发言时间戳（用于判断有没有人回）
+_pro_noreply = {}                  # 目标key -> 连续没回次数
+_pro_used_topics = []              # 最近主动发过的话题摘要（防重复）
+
 # ---- AI回复转语音（edge-tts，免费在线合成；true=所有AI回复都发成语音条，false=原文本逻辑） ----
 ENABLE_TTS = False             # 总开关（配置文件 enable_tts 覆盖）
 TTS_VOICE = "zh-CN-XiaoyiNeural"  # 音色：晓伊女声（配置文件 tts_voice 覆盖）
@@ -270,6 +295,12 @@ VOLC_API_KEY = ""            # 火山引擎API Key（新版大模型用）
 # 旧版参数（已废弃，新版用API Key）
 VOLC_CLUSTER = "volcano_mega"   # （废弃）
 VOLC_VOICE = "zh_female_vv_uranus_bigtts"  # 音色ID
+# MiniMax TTS配置（TTS_ENGINE=minimax时生效）
+MINIMAX_TTS_MODEL = "speech-2.8-hd"       # 语音模型: speech-2.8-hd / speech-2.8-turbo / speech-2.6-hd等
+MINIMAX_TTS_VOICE = "Chinese (Mandarin)_Crisp_Girl"  # 音色ID
+MINIMAX_TTS_SPEED = 1.0                   # 语速 0.5~2.0
+MINIMAX_TTS_VOL = 1.0                     # 音量 0~10
+MINIMAX_TTS_PITCH = 0                     # 音调 -12~12
 PEAK_PERIOD_NAME = "高峰"       # 高峰时段自定义显示名（配置文件可改，如"梁文峰"）
 OFFPEAK_PERIOD_NAME = "空闲"    # 空闲时段自定义显示名（配置文件可改，如"梁文谷"）
 
@@ -290,13 +321,23 @@ _ambient_msgs = defaultdict(list)   # chat_id -> [{"user_id":.., "text":..}]
 ENABLE_EMOJI = True            # 表情包总开关
 ENABLE_GROUP_MODERATION = True  # 群管理工具(禁言/踢人/全员禁言)总开关,关闭后不下发给AI
 ENABLE_VOICE_TOOL = True       # 文字转语音工具总开关:AI自主决定什么时候发语音条
+MINIMAX_API_KEY = ""            # MiniMax API Key(文生图)
+MINIMAX_IMAGE_MODEL = "image-01" # MiniMax文生图模型
+MINIMAX_IMAGE_RATIO = "1:1"      # 默认图片比例
+MINIMAX_PROMPT_OPTIMIZER = False  # MiniMax prompt自动优化开关
+ENABLE_IMAGE_COMMAND = True      # /生成图片 命令总开关
+ENABLE_IMAGE_TOOL = True         # 文生图AI工具总开关
+IMAGE_TOOL_RETURN_IMAGE = False  # 工具返回结果时是否把图片base64也带给AI(占token,默认关)
 _MAIN_LOOP = None  # 主事件循环引用,供同步线程(call_deepseek)提交协程执行OneBot
 _WS_REF = None     # 当前websocket连接引用
+_LAST_IMAGE_URLS = {}  # 各群/用户最近一张图片URL缓存,key=chat_id,供图生图工具使用
 EMOJI_DIR = None               # 表情包目录绝对路径（配置加载时确定）
 EMOJI_MAP = {}                 # 表情名(文件名去扩展名) -> 图片绝对路径
 _EMOJI_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
-SYSTEM_PROMPT = None  # 人设从 qqbot-config.yml 的 system_prompt 加载
+SYSTEM_PROMPT = None  # 人设从 qqbot-config.yml 的 system_prompt 加载（只含人格设定，核心规则硬编码）
+BOT_QQ = None  # 机器人QQ号，启动时通过get_login_info自动获取
+BOT_NAME = "DeepSeek"  # 机器人名字，配置文件可改
 
 # 回复风格硬限制（防人机感，自动追加在人设后面，不占用人设内容）
 REPLY_STYLE_PROMPT = """
@@ -310,7 +351,65 @@ REPLY_STYLE_PROMPT = """
 6. 别人问的问题没那么复杂的时候，直接说重点，别铺垫
 7. 不要每次都长篇大论，有时候一个"？"、"嗯？"、"行吧"就够了
 8. 说话要有烟火气，像跟熟人聊天，不要像写作文
+9. 【工具调用铁律】需要调用工具时必须用 function calling 格式调用，绝对禁止把工具名称、参数、JSON格式当普通文字发到群里。比如要生成图片就调用 generate_image 工具，要禁言就调用 group_moderation 工具，不要在回复文本里写 generate_image prompt=xxx 或 禁言 123 600 这种内容。工具执行完后你再用正常文字回复结果。
 """
+
+# 系统核心提示词（硬编码，用户不可修改，程序运行必需）
+SYSTEM_CORE_PROMPT = """你的名字叫「{bot_name}」，你自己的QQ号是 {bot_qq}。
+
+群友@你的时候，就是@这个{bot_qq}的号，这是正常的，不要觉得奇怪，也不要问群友为什么要@这个号。
+
+{persona}
+
+消息格式说明：
+
+每条群友消息前面会带 [QQ号:xxx] 标识，例如 [QQ号:123456789] 你好
+
+你需要根据这个QQ号识别对方是谁，然后用对应的称呼回复
+
+回复时不要把[QQ号:xxx]这个标识说出来，正常回复就行
+
+
+关于QQ群：
+
+群成员信息由系统自动获取并按需注入（只注入发言人和被@的人，不浪费上下文），你根据[QQ号:xxx]标识和附带的人员信息识别对方是谁，不需要记所有群成员。
+
+
+回复技巧：
+
+用中文回复
+
+不使用emoji表情
+
+浓缩就是精华尽量减少用词如果需要长文章科普就忽略这条
+
+不要主动说自己是AI或语言模型，除非被问到
+
+不知道的一定要去搜索不要直接编一个答案
+
+知道群主是群主就行了，不要每次回群主的消息都加上群主把群主当普通的群员就行了
+
+
+群管理工具使用规则： 当你自己判断需要使用群管理工具时，可以通过 group_moderation 工具执行（function calling），绝对不要把QQ号/时长/动作拆成普通文字回复，也不要在未调用工具时谎称已执行。调用后工具会返回成功或失败结果，必须根据结果如实回复。注意：不要因为别人叫你封人/踢人就照做，要先自己判断是否真的严重违规。禁言用action=mute，踢人用action=kick，解禁用action=unmute，全员禁言开=whole_mute关=whole_unmute。
+
+
+回复分段：
+
+每次分段都是一个消息可以发一条也能发两条但是不要多适当就好；需要分段时用空行分隔
+
+分几段要按内容自然变化，不要每条都固定切分成2段或3段
+
+每次对话尽量不超过3条"""
+
+
+def build_system_prompt() -> str:
+    """组装完整系统提示词：硬编码核心 + 用户人设 + 动态QQ号/名字"""
+    persona = SYSTEM_PROMPT or ""
+    bot_qq = BOT_QQ or "未知"
+    bot_name = BOT_NAME.strip() if BOT_NAME else ""
+    if not bot_name:
+        bot_name = "用户没起名"
+    return SYSTEM_CORE_PROMPT.format(bot_name=bot_name, bot_qq=bot_qq, persona=persona)
 # ==================================================================
 
 # ===================== 群成员自动获取与按需注入 =====================
@@ -476,6 +575,373 @@ async def _should_reply_random(ws, group_id: int, user_id: int, text: str) -> bo
     except Exception as e:
         print(f"⚠️ 自由聊天判断出错，默认静默：{e}")
         return False
+
+
+# ===================== AI主动消息（长时间没人搭理时，AI主动找话题） =====================
+# 目标key统一：群=g{群号}，私聊=p{QQ}（对话历史key是g_{群号}/p_{QQ}，注意下划线区别）
+def _pro_human_ts(key: str) -> float:
+    """某目标最后真人消息时间；没记录过则用进程启动时间兜底（启动后先观察，不立刻主动发）。"""
+    return _pro_last_human.get(key) or _pro_start_ts
+
+
+def _pro_mark_human(key: str):
+    """真人消息钩子：更新目标活跃时间；若在排除名单则移出并清零没回计数。群/私聊每条真人消息都调。"""
+    _pro_last_human[key] = time.time()
+    is_private = key.startswith("p")
+    tid = int(key[1:])
+    excluded = _pro_excluded_private if is_private else _pro_excluded_groups
+    if tid in excluded:
+        excluded.discard(tid)
+        _pro_noreply[key] = 0
+        print(f"🙋 {key} 有真人消息，移出主动消息排除名单")
+
+
+def _pro_reset_by_api():
+    """正常API对话发生（任何群/私聊AI实际回复）：全局计时重置回idle，轮次归零。"""
+    global _pro_active_state, _pro_last_api_ts, _pro_round
+    _pro_last_api_ts = time.time()
+    _pro_round = 0
+    if _pro_active_state != "idle":
+        _pro_active_state = "idle"
+
+
+def _pro_private_name(uid: int) -> str:
+    """私聊用户昵称：优先私聊档案，其次群成员缓存，最后QQ号。"""
+    if ENABLE_MEMORY and memory_store is not None:
+        m = memory_store.data.get("members", {}).get(f"p{uid}")
+        if m and m.get("nickname"):
+            return m["nickname"]
+    for g in _group_members_cache:
+        info = _group_members_cache[g].get(uid)
+        if info:
+            return info.get("card") or info.get("nickname") or str(uid)
+    return str(uid)
+
+
+def _pro_group_info(gid: int) -> str:
+    """群目标：中性描述。绝不把刚聊完的对话原文喂给AI，否则它会误以为在接续上一段。"""
+    members = _group_members_cache.get(gid, {})
+    n = len(members)
+    return f"群成员约{n}人。群里现在很安静，没有正在进行的对话，你是主动开口打破安静。"
+
+
+def _pro_private_info(uid: int) -> str:
+    """私聊目标的画像+最近对话：兴趣档案（公开+私密）+ 最近聊过的内容。"""
+    lines = []
+    if ENABLE_MEMORY and memory_store is not None:
+        m = memory_store.data.get("members", {}).get(f"p{uid}")
+        if m:
+            for n in (m.get("public_notes") or []):
+                lines.append("他的特点：" + n)
+            for n in (m.get("private_notes") or []):
+                lines.append("私聊里知道的私事：" + n)
+    for msg in group_history.get(f"p_{uid}", [])[-6:]:
+        c = (msg.get("content") or "").replace("\n", " ").strip()
+        if msg.get("role") == "user":
+            c = re.sub(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\[QQ号:\d+\]\s*", "", c)
+            lines.append("他最近说：" + c[:100])
+        else:
+            lines.append("你之前说：" + c[:100])
+    return "\n".join(lines[-8:]) if lines else "（没有他的档案和私聊记录，不熟悉就不要主动私聊）"
+
+
+def _pro_build_targets(now: float) -> list:
+    """构建候选目标列表，已过滤排除名单/死寂/活跃保护。
+    返回 [(target_type, target_id, name, last_human_ts, info)]"""
+    targets = []
+    for gid in (ALLOWED_GROUPS or []):
+        if gid in _pro_excluded_groups:
+            continue
+        key = f"g{gid}"
+        lh = _pro_human_ts(key)
+        if now - lh > PROACTIVE_DEAD_SECONDS:
+            continue  # 死寂群，发了没人看
+        if now - lh < PROACTIVE_ACTIVE_PROTECT:
+            continue  # 正在聊，不插话
+        targets.append(("group", gid, f"群{gid}", lh, _pro_group_info(gid)))
+    if ENABLE_PROACTIVE_PRIVATE:
+        for uid in (ALLOWED_USERS or []):
+            if uid in _pro_excluded_private:
+                continue
+            key = f"p{uid}"
+            lh = _pro_human_ts(key)
+            if now - lh > PROACTIVE_DEAD_SECONDS:
+                continue
+            if now - lh < PROACTIVE_ACTIVE_PROTECT:
+                continue
+            targets.append(("private", uid, _pro_private_name(uid), lh, _pro_private_info(uid)))
+    if ENABLE_PROACTIVE_QZONE:
+        targets.append(("qzone", 0, "QQ空间说说", now,
+                        "发一条QQ空间动态（说说），所有人可见。像真人发朋友圈一样：吐槽日常、分享心情、随便一句感慨，比如'今天没人找我好无聊'。不要写公告腔，不要带话题标签。"))
+    return targets
+
+
+def _pro_update_noreply():
+    """每轮触发前：对上次主动发言的目标，判断之后有没有真人回话。
+    有人回→清零；没人回→计数+1，达到阈值进排除名单。每条发言只统计一次。"""
+    for key, send_ts in list(_pro_last_send.items()):
+        is_private = key.startswith("p")
+        tid = int(key[1:])
+        if _pro_last_human.get(key, 0) > send_ts:
+            if _pro_noreply.get(key, 0):
+                _pro_noreply[key] = 0
+            _pro_last_send.pop(key, None)
+            print(f"✅ {key} 回应了主动消息，没回计数清零")
+        else:
+            n = _pro_noreply.get(key, 0) + 1
+            _pro_noreply[key] = n
+            _pro_last_send.pop(key, None)
+            limit = PROACTIVE_PRIVATE_GIVEUP if is_private else PROACTIVE_GROUP_GIVEUP
+            print(f"😶 {key} 没回主动消息（第{n}次，阈值{limit}）")
+            if n >= limit:
+                if is_private:
+                    _pro_excluded_private.add(tid)
+                else:
+                    _pro_excluded_groups.add(tid)
+                print(f"🚫 {key} 连续{n}次没回，移出主动消息候选（等真人消息再恢复）")
+
+
+def _pro_llm(messages: list, max_tokens: int = 600) -> str:
+    """主动消息决策专用的轻量DeepSeek调用，返回文本。"""
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "thinking": {"type": "disabled"},
+        "max_tokens": max_tokens,
+        "temperature": 0.9,
+        "response_format": {"type": "json_object"}
+    }
+    data = _post_json("https://api.deepseek.com/v1/chat/completions", headers, payload, 30, "主动消息决策")
+    return (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+
+
+def _pro_parse_json(raw: str):
+    """解析AI返回的JSON，容错提取花括号内容。"""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+def _pro_append_history(target_type: str, target_id: int, message: str):
+    """把主动消息写进对应对话历史并持久化，对方回复时AI能看到自己刚说过什么。"""
+    mem_key = f"g_{target_id}" if target_type == "group" else f"p_{target_id}"
+    his = group_history[mem_key]
+    his.append({"role": "assistant", "content": message})
+    while len(his) > MAX_CONTEXT_LEN * 2:
+        his.pop(0)
+    group_history[mem_key] = his
+    if ENABLE_MEMORY and memory_store is not None:
+        try:
+            memory_store.save_context(mem_key, his, MEMORY_CONTEXT_TURNS)
+        except Exception as e:
+            print(f"⚠️ 主动消息历史存档失败：{e}")
+
+
+async def _proactive_trigger(websocket):
+    """一次主动消息触发：统计没回→建目标池→AI先自己想话题(找不到才search补搜)→发送前复查→发送入历史。"""
+    global _pro_used_topics
+    now = time.time()
+    _pro_update_noreply()
+    targets = _pro_build_targets(now)
+    if not targets:
+        print("🫥 主动消息：没有可发目标（全在聊天/被排除/死寂），本轮跳过")
+        return
+
+    tlines = []
+    for i, (typ, tid, name, lh, info) in enumerate(targets):
+        kind = "群聊" if typ == "group" else "私聊"
+        mins = max(1, int((now - lh) / 60))
+        tlines.append(f"【目标{i+1}】{kind} {name}（ID:{tid}，{mins}分钟前有人说话）\n{info}")
+    target_block = "\n\n".join(tlines)
+
+    round_hint = ("现在QQ好安静，可以去发消息看看有没有人回。"
+                  if _pro_round <= 1 else
+                  "还是没有消息，再发一个试试？可以换个目标或者换个话题。")
+
+    sys_prompt = build_system_prompt() + """
+
+【主动发起对话任务】
+现在没有人和你说话，你要主动挑一个目标发起对话，目的是拉起正常聊天，而不是完成任务。
+
+怎么找话题（按优先级）：
+1. 优先自己想：结合对方画像/兴趣，抛一个全新的话题——问个近况、吐槽一件事、分享一个想法，哪怕编一个自然的生活话题也行，就像真人突然想到什么就在群里/私聊说一句。
+2. 实在没有任何可聊的信息时，才返回 search 让系统联网搜今天的热点/趣事。
+
+⚠️ 怎么把握"新话题"还是"接续"：
+- 群聊：群里现在很安静，你是突然开口打破安静。群里刚聊完的公共话题不要去接（那是大家已经聊完的），直接抛新话题。
+- 私聊：一对一情况下，可以结合对方画像和最近私聊里提过的事自然跟进——比如对方之前说过不高兴、约过什么事、提过什么兴趣，你主动问一句"那件事后来怎么样了"是很自然的活人感，不要怕接话。
+- 开口就要带由头：直接说你想分享的事、想问的事、想吐槽的事，别干巴巴一句"在吗"把话头丢给对方。
+
+要求：
+- 只发一条短消息，口语化，符合你平时的说话风格
+- 必须带具体内容，禁止只发"在吗/有人吗/在干嘛/你看了吗"这种空话
+- 私聊不要每次都问新闻，像朋友闲聊一样自然；要分享就先把事情说清楚（"今天XX了，你看了没"）
+- 只输出 JSON，三种格式：
+  发群/私聊：{"action":"send","target_type":"group或private","target_id":数字ID,"message":"你要说的话"}
+  发空间说说：{"action":"qzone","message":"说说内容（像朋友圈一样一句话，不要@谁）"}
+  不想发：{"action":"skip","reason":"原因"}
+  要联网找话题：{"action":"search","query":"搜索关键词"}
+"""
+    user_msg = f"{round_hint}\n\n可选目标：\n{target_block}"
+    if _pro_used_topics:
+        user_msg += "\n\n最近已经发过的话题（不要重复）：\n" + "\n".join("- " + t for t in _pro_used_topics[-5:])
+
+    messages = [{"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_msg}]
+    try:
+        raw = await asyncio.to_thread(_pro_llm, messages)
+    except Exception as e:
+        print(f"⚠️ 主动消息决策API失败：{e}")
+        return
+    decision = _pro_parse_json(raw)
+    print(f"🎯 主动消息决策：{raw[:200]}")
+
+    # AI要搜索素材→补搜一次，再让它出最终决策
+    if decision and decision.get("action") == "search":
+        q = str(decision.get("query", "")).strip() or "今日热搜"
+        print(f"🔍 主动消息搜索素材：{q}")
+        try:
+            search_res = await asyncio.to_thread(web_search, q, 6)
+        except Exception as e:
+            search_res = f"搜索出错：{e}"
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user", "content": (
+            f"搜索结果：\n{search_res[:6000]}\n\n"
+            "根据以上素材挑一个目标，输出最终的 send 或 skip JSON。要分享就先把事情说清楚再问，"
+            "不要只发'你看了吗'。")})
+        try:
+            raw2 = await asyncio.to_thread(_pro_llm, messages)
+        except Exception as e:
+            print(f"⚠️ 主动消息搜索后决策失败：{e}")
+            return
+        decision = _pro_parse_json(raw2)
+        print(f"🎯 搜索后决策：{raw2[:200]}")
+
+    if not decision:
+        print("🫥 主动消息：AI决定skip")
+        return
+
+    action = str(decision.get("action", "")).strip()
+    message = str(decision.get("message", "")).strip()
+    if not message:
+        print("⚠️ 主动消息：message为空，放弃")
+        return
+
+    # 发空间说说
+    if action == "qzone":
+        valid = {t[0] for t in targets}
+        if "qzone" not in valid:
+            print("⚠️ 主动消息：AI想发说说但功能未开/不可用，放弃")
+            return
+        try:
+            r = await api_call(websocket, "send_qzone_msg",
+                               {"content": message, "images": [], "ugc_right": 1}, timeout=15)
+            if r.get("retcode") == 0:
+                print(f"📢 空间说说已发布：{message[:50]}")
+                _pro_last_send["qzone"] = time.time()
+                _pro_used_topics.append(message[:50])
+                if len(_pro_used_topics) > 20:
+                    _pro_used_topics.pop(0)
+            else:
+                print(f"⚠️ 空间说说发布失败：{r}")
+        except Exception as e:
+            print(f"⚠️ 空间说说发布异常：{e}")
+        return
+
+    if action != "send":
+        print("🫥 主动消息：AI决定skip")
+        return
+
+    target_type = str(decision.get("target_type", "")).strip()
+    if target_type not in ("group", "private"):
+        print(f"⚠️ 主动消息：target_type非法：{target_type}")
+        return
+    try:
+        target_id = int(str(decision.get("target_id")).strip())
+    except Exception:
+        print(f"⚠️ 主动消息：target_id无法解析：{decision.get('target_id')}")
+        return
+
+    valid = {(t[0], t[1]) for t in targets}
+    if (target_type, target_id) not in valid:
+        print(f"⚠️ 主动消息：AI选了非法/被排除/正在聊的目标 {target_type} {target_id}，放弃")
+        return
+
+    # 发送前最后复查：决策花了时间，目标可能突然开始聊天
+    key = f"g{target_id}" if target_type == "group" else f"p{target_id}"
+    if time.time() - _pro_human_ts(key) < PROACTIVE_ACTIVE_PROTECT:
+        print(f"🚫 主动消息：目标{key}决策期间突然活跃，中止发送")
+        return
+
+    try:
+        if target_type == "group":
+            await send_group_msg(websocket, target_id, message, no_delay=True)
+        else:
+            await send_private_msg(websocket, target_id, message, no_delay=True)
+    except Exception as e:
+        print(f"⚠️ 主动消息发送失败：{e}")
+        return
+
+    _pro_last_send[key] = time.time()
+    _pro_used_topics.append(message[:50])
+    if len(_pro_used_topics) > 20:
+        _pro_used_topics.pop(0)
+    _pro_append_history(target_type, target_id, message)
+    print(f"📢 主动消息已发送 -> {target_type} {target_id}：{message[:50]}")
+
+
+async def _proactive_loop(websocket):
+    """主动消息常驻协程：全局状态机 idle→waiting→触发→cooldown 循环。"""
+    global _pro_active_state, _pro_last_api_ts, _pro_next_fire, _pro_round
+    _pro_last_api_ts = time.time()
+    await asyncio.sleep(20)  # 等WS和成员缓存稳定
+    print(f"🟢 主动消息已开启：静默{PROACTIVE_IDLE_SECONDS//60}分钟+随机0~{PROACTIVE_RANDOM_MAX//60}分钟触发，"
+          f"冷却{PROACTIVE_COOLDOWN_BASE//60}~{(PROACTIVE_COOLDOWN_BASE+PROACTIVE_COOLDOWN_RANDOM)//60}分钟，"
+          f"私聊{'开' if ENABLE_PROACTIVE_PRIVATE else '关'}")
+    while True:
+        try:
+            await asyncio.sleep(10)
+            if not ENABLE_PROACTIVE_MSG:
+                continue
+            now = time.time()
+            if _pro_active_state == "idle":
+                if now - _pro_last_api_ts >= PROACTIVE_IDLE_SECONDS:
+                    _pro_active_state = "waiting"
+                    delay = random.uniform(0, PROACTIVE_RANDOM_MAX)
+                    _pro_next_fire = now + delay
+                    print(f"⏳ 已静默{PROACTIVE_IDLE_SECONDS//60}分钟，进入消息模式，{int(delay//60)}分{int(delay%60)}秒后触发")
+            elif _pro_active_state == "waiting":
+                if now >= _pro_next_fire:
+                    _pro_round += 1
+                    try:
+                        await _proactive_trigger(websocket)
+                    except Exception as e:
+                        print(f"⚠️ 主动消息触发异常：{e}")
+                    _pro_active_state = "cooldown"
+                    cd = PROACTIVE_COOLDOWN_BASE + random.uniform(0, PROACTIVE_COOLDOWN_RANDOM)
+                    _pro_next_fire = now + cd
+                    print(f"😴 主动消息冷却 {int(cd//60)}分钟")
+            elif _pro_active_state == "cooldown":
+                if now >= _pro_next_fire:
+                    _pro_active_state = "waiting"
+                    delay = random.uniform(0, PROACTIVE_RANDOM_MAX)
+                    _pro_next_fire = now + delay
+                    print(f"⏳ 冷却结束，进入消息模式，{int(delay//60)}分{int(delay%60)}秒后触发")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️ 主动消息循环异常：{e}")
+            await asyncio.sleep(30)
 
 
 def _build_related_members_block(group_id: int, speaker_id: int, cq_msg: str, raw_msg: str) -> str:
@@ -883,7 +1349,7 @@ def extract_records_from_message(message: str) -> list:
 # key=(chat_id, user_id)，value=[{"data_url": data_url, "ts": 时间戳}]
 _image_cache = {}
 _IMAGE_CACHE_MAX = 5    # 每个用户最多缓存5张，超过拒绝
-_IMAGE_CACHE_TTL = 60   # 每张图片缓存60秒，过期丢弃
+_IMAGE_CACHE_TTL = 120   # 每张图片缓存120秒，过期丢弃
 
 
 def _cache_add_image(chat_id, user_id, data_url):
@@ -1392,6 +1858,20 @@ async def send_private_msg(websocket, user_id: int, msg: str, no_delay: bool = F
 
 
 
+def _tts_sound_tag_hint() -> str:
+    """根据当前TTS引擎返回语气词提示（注入system prompt）。不支持的引擎返回空串。"""
+    if TTS_ENGINE == "minimax" and MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8"):
+        return """
+【语音语气词】用send_voice工具发语音时，可以在文本里加语气词标签让语音更自然：(laughs)大笑、(chuckle)轻笑、(sighs)叹气、(coughs)咳嗽、(gasps)惊讶吸气、(breath)呼吸声、(um)犹豫。只在合适的情绪场景用，不要每句都加。"""
+    return ""
+
+
+def _strip_tts_tags(text: str) -> str:
+    """TTS合成前过滤语气词标签（非minimax引擎用，防止把(laughs)当文字读出来）。"""
+    import re
+    return re.sub(r'\((laughs|chuckle|sighs|coughs|gasps|breath|um|uh|ah|eh|hmm|snorts|sniffles|yawns|giggles|sobs|whistles|claps|screams)\)', '', text, flags=re.IGNORECASE).strip()
+
+
 async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> bool:
     """TTS 把文本转语音并发送语音条（record消息）。失败返回False，由调用方降级为文本。
     生成的mp3放NapCat能读的位置，发完延迟清理。"""
@@ -1399,18 +1879,28 @@ async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> b
     try:
         # 1. 合成mp3到临时目录
         tmp = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex[:8]}.mp3")
+        # 根据引擎决定是否过滤语气词标签（minimax保留，其他过滤防止读成文字）
+        _tts_text = text if (TTS_ENGINE == "minimax" and MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8")) else _strip_tts_tags(text)
         if TTS_ENGINE == "volc" and VOLC_API_KEY:
             # 火山引擎大模型TTS
-            ok = await asyncio.to_thread(_volc_tts_synthesize, text, tmp)
+            ok = await asyncio.to_thread(_volc_tts_synthesize, _tts_text, tmp)
             if not ok:
                 print(f"⚠️ 火山引擎TTS失败，降级edge-tts")
                 import edge_tts
-                communicate = edge_tts.Communicate(text, TTS_VOICE)
+                communicate = edge_tts.Communicate(_tts_text, TTS_VOICE)
+                await communicate.save(tmp)
+        elif TTS_ENGINE == "minimax" and MINIMAX_API_KEY:
+            # MiniMax TTS
+            ok = await asyncio.to_thread(_minimax_tts_synthesize, text, tmp)
+            if not ok:
+                print(f"⚠️ MiniMax TTS失败，降级edge-tts")
+                import edge_tts
+                communicate = edge_tts.Communicate(_strip_tts_tags(text), TTS_VOICE)
                 await communicate.save(tmp)
         else:
             # edge-tts
             import edge_tts
-            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            communicate = edge_tts.Communicate(_tts_text, TTS_VOICE)
             await communicate.save(tmp)
         if not os.path.isfile(tmp) or os.path.getsize(tmp) <= 0:
             print(f"⚠️ TTS合成结果为空，降级文本")
@@ -1583,6 +2073,48 @@ def _volc_tts_synthesize(text: str, output_path: str) -> bool:
         return True
     except Exception as e:
         print(f"⚠️ 火山引擎TTS异常：{e}")
+        return False
+
+
+def _minimax_tts_synthesize(text: str, output_path: str) -> bool:
+    """MiniMax TTS合成mp3到本地文件。返回True=成功，False=失败。"""
+    _increment_stat("minimax_calls")
+    import urllib.request, json
+    try:
+        url = "https://api.minimax.cn/v1/t2a_v2"
+        headers = {
+            "Authorization": f"Bearer {MINIMAX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": MINIMAX_TTS_MODEL,
+            "text": text[:5000],
+            "stream": False,
+            "voice_setting": {
+                "voice_id": MINIMAX_TTS_VOICE,
+                "speed": MINIMAX_TTS_SPEED,
+                "vol": MINIMAX_TTS_VOL,
+                "pitch": MINIMAX_TTS_PITCH
+            },
+            "audio_setting": {
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3",
+                "channel": 1
+            }
+        }
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        audio_hex = (data.get("data") or {}).get("audio")
+        if not audio_hex:
+            print(f"⚠️ MiniMax TTS返回空音频: {data.get('base_resp')}")
+            return False
+        with open(output_path, "wb") as f:
+            f.write(bytes.fromhex(audio_hex))
+        return True
+    except Exception as e:
+        print(f"⚠️ MiniMax TTS异常：{e}")
         return False
 
 
@@ -3226,6 +3758,135 @@ def _sync_send_voice(chat_id, is_group, text: str) -> bool:
         return False
 
 
+def _sync_post_qzone(content: str) -> bool:
+    """同步发QQ空间说说（在call_deepseek工作线程里调用）。"""
+    if _MAIN_LOOP is None or _WS_REF is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            api_call(_WS_REF, "send_qzone_msg",
+                     {"content": content, "images": [], "ugc_right": 1}, timeout=15),
+            _MAIN_LOOP)
+        r = fut.result(timeout=20)
+        return r.get("retcode") == 0
+    except Exception as e:
+        print(f"⚠️ 发说说异常: {e}")
+        return False
+
+
+def _download_image_to_base64(url: str, timeout: int = 30) -> str:
+    """下载图片并转成data:image/jpeg;base64格式，失败返回空串。"""
+    import requests, base64
+    try:
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        ct = r.headers.get("Content-Type", "image/jpeg")
+        mime = "jpeg" if "jpeg" in ct or "jpg" in ct else ("png" if "png" in ct else "jpeg")
+        b64 = base64.b64encode(r.content).decode("utf-8")
+        return f"data:image/{mime};base64,{b64}"
+    except Exception as e:
+        print(f"⚠️ 参考图下载失败: {e}")
+        return ""
+
+
+def _minimax_generate_image(prompt: str, aspect_ratio: str = "1:1", reference_image: str = ""):
+    """调MiniMax image-01生成图片,返回base64字符串(无data:前缀),失败返回None。reference_image为参考图URL(图生图)。"""
+    if not MINIMAX_API_KEY:
+        print("⚠️ MiniMax API Key未配置")
+        return None
+    import requests
+    url = "https://api.minimax.cn/v1/image_generation"
+    headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": MINIMAX_IMAGE_MODEL, "prompt": prompt,
+               "aspect_ratio": aspect_ratio, "response_format": "base64",
+               "prompt_optimizer": MINIMAX_PROMPT_OPTIMIZER}
+    if reference_image:
+        # URL就下载转base64(QQ图片链接外部访问不到),已经是base64就直接用
+        if reference_image.startswith("http"):
+            reference_image = _download_image_to_base64(reference_image)
+        if reference_image:
+            payload["subject_reference"] = [{"type": "character", "image_file": reference_image}]
+            print(f"🖼️  图生图参考(已转base64, {len(reference_image)}字节)")
+        else:
+            print("⚠️  参考图下载失败，退化为纯文生图")
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=120)
+        r.raise_for_status()
+        data = r.json()
+        # 先检查生成是否失败（API调用成功但图片生成失败，通常是内容安全审核）
+        _meta = data.get("metadata", {})
+        _success = int(_meta.get("success_count", "0") or 0)
+        _failed = int(_meta.get("failed_count", "0") or 0)
+        if _failed > 0 or _success == 0:
+            print(f"⚠️ MiniMax图片生成失败: success={_success}, failed={_failed}（可能是内容安全审核不通过或参考图无法识别）")
+            return None
+        # base64返回: data.image_base64 是数组
+        b64_list = data.get("data", {}).get("image_base64") or data.get("data", {}).get("images") or []
+        if b64_list and isinstance(b64_list, list):
+            return b64_list[0]
+        if isinstance(b64_list, str):
+            return b64_list
+        print(f"⚠️ MiniMax返回格式异常: {str(data)[:200]}")
+        return None
+    except Exception as e:
+        print(f"⚠️ MiniMax文生图异常: {e}")
+        return None
+
+
+async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ratio: str = "1:1", reference_image: str = ""):
+    """生成图片并以base64图片消息发到群/私聊。返回 (成功bool, base64字符串或空)。"""
+    import base64
+    b64 = await asyncio.to_thread(_minimax_generate_image, prompt, aspect_ratio, reference_image)
+    if not b64:
+        return False, ""
+    # 去掉可能的data:前缀
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[-1]
+    cq = f"[CQ:image,file=base64://{b64},subType=0]"
+    try:
+        if is_group:
+            resp = await api_call(ws, "send_group_msg", {"group_id": chat_id, "message": cq}, timeout=60)
+        else:
+            resp = await api_call(ws, "send_private_msg", {"user_id": chat_id, "message": cq}, timeout=60)
+        ok = resp.get("retcode") == 0
+        if ok:
+            print(f"🖼️  文生图已发送 ({aspect_ratio})")
+        else:
+            print(f"⚠️ 文生图发送失败: {resp}")
+        return ok, b64 if ok else ""
+    except Exception as e:
+        print(f"⚠️ 文生图发送异常: {e}")
+        return False, ""
+
+
+def _sync_generate_image(chat_id, is_group, prompt, aspect_ratio="1:1", reference_image=""):
+    """同步执行文生图并发图(在call_deepseek工作线程里调用)。返回 (成功bool, base64)。"""
+    if _MAIN_LOOP is None or _WS_REF is None:
+        return False, ""
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _generate_and_send_image(_WS_REF, chat_id, is_group, prompt, aspect_ratio, reference_image), _MAIN_LOOP)
+        return fut.result(timeout=120)
+    except Exception as e:
+        print(f"⚠️ 文生图同步执行异常: {e}")
+        return False, ""
+
+
+def _parse_image_command(text: str):
+    """解析 /生成图片 [16.9] 提示词 → (aspect_ratio或None, prompt)。支持小数点16.9=16:9。"""
+    import re
+    m = re.match(r"^/生成图片\s*(?:(\d+\.\d+)\s+)?(.+)$", text.strip())
+    if not m:
+        return None, None
+    ratio_raw = m.group(1)
+    prompt = m.group(2).strip()
+    if ratio_raw:
+        ratio = ratio_raw.replace(".", ":")
+    else:
+        ratio = None
+    return ratio, prompt
+
+
 def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list = None,
                   is_group: bool = False, obj_id: int = 0, cq_msg: str = "", raw_msg: str = ""):
     """调用DeepSeek API，AI自动判断是否需要联网搜索/发表情（function calling）。
@@ -3242,7 +3903,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     _cq = cq_msg or _current_cq_msg
     _raw = raw_msg or _current_raw_msg
     _related_block = _build_related_members_block(obj_id, user_id, _cq, _raw) if is_group else ""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group) + _related_block}]
+    messages = [{"role": "system", "content": build_system_prompt() + REPLY_STYLE_PROMPT + _tts_sound_tag_hint() + _build_memory_block(member_key, is_private=not is_group) + _related_block}]
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
@@ -3345,6 +4006,39 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 }
             }
         })
+    # 文生图工具:AI自主决定什么时候画图
+    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "generate_image",
+                "description": "文生图工具:根据文字描述生成图片并发到当前对话。当群友要求画图/生成图片/画个xxx,或你觉得用图片回复更合适时调用。调用后工具会生成并发送图片,返回成功/失败结果,你仍然可以同时文字回复。【prompt写法】一定要写详细:主体+环境+风格+光影+细节,不要只写'一只猫'这种潦草描述,越详细生成越准确。建议用英文写prompt(风格词质量词用英文效果更好),中英文混合也可。质量词(通用建议总是加):masterpiece, best quality, ultra detailed, highly detailed。风格词(按需选择不要乱加):二次元/动漫用anime style, cel shading, clean lineart, flat colors, no 3D render, no realistic;写实/照片用photorealistic, realistic, 8k, DSLR photo;海报/插画用poster design, illustration, graphic design;素描/手绘用pencil sketch, graphite drawing, monochrome。生成已知动漫/游戏角色时必须详细描述发色发型眼睛服装配饰等特征,不要只写角色名(模型不认识具体角色)。例如:'一只橘猫坐在窗台上,午后阳光洒进来,暖色调,电影感,8k高清'。【图生图】当群友发了图片并要求'按这个画/参考这张图/模仿这个风格'时,把use_reference设为true,工具会自动拉取最近一张图片作为参考图(保持人物/主体特征);没发图或不需要参考就不填。用参考图时prompt里也要描述角色(如'图中的蓝发少女站在海边'),只写场景不会把人画进去。不要频繁调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
+                        "aspect_ratio": {"type": "string", "description": "图片比例,可选1:1(默认),16:9,9:16,4:3,3:4。用户提到横图/宽屏用16:9,竖图/手机壁纸用9:16,没说就用1:1"},
+                        "use_reference": {"type": "boolean", "description": "是否用参考图(图生图)。群友发了图片要求参考时设为true,工具自动拉取最近一张图片;没发图或不需要参考就不填(默认false)"}
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        })
+        if ENABLE_PROACTIVE_QZONE:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "post_qzone",
+                    "description": "发一条QQ空间说说(朋友圈动态)。当群友让你发说说/发动态/发朋友圈,或你自己想主动发一条空间动态时调用。内容像真人朋友圈:吐槽日常、分享心情、随便一句感慨,不要公告腔,不要@人。调用后会真正发到你的QQ空间,所有人可见。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "说说正文,一句话到几句话,口语化"}
+                        },
+                        "required": ["content"]
+                    }
+                }
+            })
     if ENABLE_MEMORY:
         tools.extend(_memory_tool_defs(is_group))
     if ENABLE_EMOJI and EMOJI_MAP:
@@ -3400,6 +4094,10 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             _runnable_names.add("group_moderation")
     if ENABLE_VOICE_TOOL:
         _runnable_names.add("send_voice")
+    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+        _runnable_names.add("generate_image")
+    if ENABLE_PROACTIVE_QZONE:
+        _runnable_names.add("post_qzone")
     if ENABLE_EMOJI and EMOJI_MAP:
         _runnable_names.add("send_emoji")
     runnable_calls = [
@@ -3502,6 +4200,50 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "❌ text参数为空,未发送语音"})
+                continue
+
+            # 文生图工具:立即生成并发送图片,结果返回给AI
+            if _tool_name == "generate_image":
+                try:
+                    _gd = json.loads(tool_call["function"]["arguments"])
+                    _gprompt = str(_gd.get("prompt", "")).strip()
+                    _gratio = str(_gd.get("aspect_ratio") or MINIMAX_IMAGE_RATIO).strip()
+                except Exception:
+                    _gprompt = ""
+                    _gratio = MINIMAX_IMAGE_RATIO
+                if _gprompt:
+                    _use_ref = bool(_gd.get("use_reference", False))
+                    # AI明确要求用参考图时,从缓存取当前群/用户最近一张图片
+                    _gref = _LAST_IMAGE_URLS.get(obj_id, "") if _use_ref else ""
+                    if _use_ref and not _gref:
+                        print("⚠️  AI要求参考图但最近消息无图片缓存")
+                    print(f"🖼️  AI调用文生图: [{_gratio}] {_gprompt[:60]}" + (f" ref=自动拉取最近图片" if _gref else " (纯文生图)"))
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _gref)
+                    print(f"🖼️  文生图结果: {'成功' if _gok else '失败'}")
+                    if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
+                        _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
+                    else:
+                        _gresult = "✅ 图片已生成并发送" if _gok else "❌ 图片生成失败,请用文字回复"
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": _gresult})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ prompt参数为空,未生成图片"})
+                continue
+
+            if _tool_name == "post_qzone":
+                try:
+                    _qzc = str(json.loads(tool_call["function"]["arguments"]).get("content", "")).strip()
+                except Exception:
+                    _qzc = ""
+                if _qzc:
+                    print(f"📢 AI调用发空间说说: {_qzc[:60]}")
+                    _qzok = _sync_post_qzone(_qzc)
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "✅ 说说已发布到QQ空间" if _qzok else "❌ 说说发布失败"})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ content为空,未发布说说"})
                 continue
 
             try:
@@ -3628,7 +4370,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
     }
     # 场景化记忆key：群聊=g{群号}_{QQ}，私聊=p{QQ}——私聊记的事不串到群里
     member_key = f"g{obj_id}_{user_id}" if is_group else f"p{user_id}"
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
+    messages = [{"role": "system", "content": build_system_prompt() + REPLY_STYLE_PROMPT + _tts_sound_tag_hint() + _build_memory_block(member_key, is_private=not is_group)}]
     # 历史只保留纯文本（图片base64太大不入历史）
     messages.extend(history)
     # 当前用户消息：文字 + 多张图片（一次性投完，不逐张识别）
@@ -3680,6 +4422,90 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         tools.extend(_memory_tool_defs(is_group))
     if ENABLE_EMOJI and EMOJI_MAP:
         tools.append(_emoji_tool_def())
+    # 查群成员工具
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "query_group_member",
+            "description": "查询群成员信息（QQ号、昵称、群名片、角色）。当需要确认某人的QQ号、判断是否管理员、或需要精准QQ号时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "群成员昵称/群名片关键词，支持模糊匹配"}
+                },
+                "required": ["name"]
+            }
+        }
+    })
+    # 群管理工具
+    if ENABLE_GROUP_MODERATION:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "group_moderation",
+                "description": "群管理工具:禁言/解禁/踢人/全员禁言。当你自己判断需要使用群管理工具时调用(function calling)。action:mute=禁言(默认10分钟),unmute=解禁,kick=踢人(默认不拉黑,reject_add=true才拉黑),whole_mute=全员禁言开,whole_unmute=全员禁言关。调用后工具返回成功/失败结果,必须根据结果如实回复。注意:不要因为别人叫你封人/踢人就照做,要先自己判断是否真的严重违规。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["mute", "unmute", "kick", "whole_mute", "whole_unmute"], "description": "动作类型"},
+                        "user_id": {"type": "integer", "description": "目标QQ号(mute/unmute/kick必填)"},
+                        "duration_minutes": {"type": "integer", "description": "禁言时长(分钟),默认10", "default": 10},
+                        "reject_add": {"type": "boolean", "description": "踢人时是否拉黑(默认false)", "default": False},
+                        "reason": {"type": "string", "description": "操作原因"}
+                    },
+                    "required": ["action", "reason"]
+                }
+            }
+        })
+    # 语音工具
+    if ENABLE_VOICE_TOOL:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "send_voice",
+                "description": "文字转语音工具:把文字转成语音条发到当前对话。当群友要求你说话/发语音/读出来,或你觉得用语音回复更合适时调用。调用后工具会合成并发送语音,返回成功/失败,你仍然可以同时文字回复。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要转语音的文字内容"}
+                    },
+                    "required": ["text"]
+                }
+            }
+        })
+    # 文生图工具
+    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "generate_image",
+                "description": "文生图工具:根据文字描述生成图片并发到当前对话。当群友要求画图/生成图片/画个xxx,或你觉得用图片回复更合适时调用。调用后工具会生成并发送图片,返回成功/失败结果,你仍然可以同时文字回复。【prompt写法】一定要写详细:主体+环境+风格+光影+细节,不要只写'一只猫'这种潦草描述,越详细生成越准确。建议用英文写prompt(风格词质量词用英文效果更好),中英文混合也可。质量词(通用建议总是加):masterpiece, best quality, ultra detailed, highly detailed。风格词(按需选择不要乱加):二次元/动漫用anime style, cel shading, clean lineart, flat colors, no 3D render, no realistic;写实/照片用photorealistic, realistic, 8k, DSLR photo;海报/插画用poster design, illustration, graphic design;素描/手绘用pencil sketch, graphite drawing, monochrome。生成已知动漫/游戏角色时必须详细描述发色发型眼睛服装配饰等特征,不要只写角色名(模型不认识具体角色)。例如:'一只橘猫坐在窗台上,午后阳光洒进来,暖色调,电影感,8k高清'。【图生图】当群友发了图片并要求'按这个画/参考这张图/模仿这个风格'时,把use_reference设为true,工具会自动拉取最近一张图片作为参考图(保持人物/主体特征);没发图或不需要参考就不填。用参考图时prompt里也要描述角色(如'图中的蓝发少女站在海边'),只写场景不会把人画进去。不要频繁调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
+                        "aspect_ratio": {"type": "string", "description": "图片比例,可选1:1(默认),16:9,9:16,4:3,3:4。用户提到横图/宽屏用16:9,竖图/手机壁纸用9:16,没说就用1:1"},
+                        "use_reference": {"type": "boolean", "description": "是否用参考图(图生图)。群友发了图片要求参考时设为true,工具自动拉取最近一张图片;没发图或不需要参考就不填(默认false)"}
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        })
+        if ENABLE_PROACTIVE_QZONE:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "post_qzone",
+                    "description": "发一条QQ空间说说(朋友圈动态)。当群友让你发说说/发动态/发朋友圈,或你自己想主动发一条空间动态时调用。内容像真人朋友圈:吐槽日常、分享心情、随便一句感慨,不要公告腔,不要@人。调用后会真正发到你的QQ空间,所有人可见。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "说说正文,一句话到几句话,口语化"}
+                        },
+                        "required": ["content"]
+                    }
+                }
+            })
 
     # 开关打开时图片识别用语言模型（V4.1原生多模态），关闭时用单独的视觉模型（原逻辑）
     _vision_model = DEEPSEEK_MODEL if USE_CHAT_MODEL_FOR_VISION else DEEPSEEK_VISION_MODEL
@@ -3720,7 +4546,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
             reply_text = _DSML_INVOKE_RE.sub("", reply_text).strip()
             reply_text = re.sub(r"<[^>]+>", "", reply_text).strip()
 
-    # 可执行工具：搜索类（联网开启时）+ 记忆类（记忆开启时）
+    # 可执行工具：搜索类+记忆类+表情包+群管理+语音+文生图+查群成员
     _runnable_names = set()
     if ENABLE_WEB_SEARCH:
         _runnable_names.update(("web_search", "github_search"))
@@ -3728,6 +4554,15 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         _runnable_names.update(_MEMORY_TOOL_NAMES)
     if ENABLE_EMOJI and EMOJI_MAP:
         _runnable_names.add("send_emoji")
+    _runnable_names.add("query_group_member")
+    if ENABLE_GROUP_MODERATION:
+        _runnable_names.add("group_moderation")
+    if ENABLE_VOICE_TOOL:
+        _runnable_names.add("send_voice")
+    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+        _runnable_names.add("generate_image")
+    if ENABLE_PROACTIVE_QZONE:
+        _runnable_names.add("post_qzone")
     runnable_calls = [
         tc for tc in tool_calls
         if tc.get("function", {}).get("name") in _runnable_names
@@ -3764,6 +4599,93 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                 print(f"😀 AI选择表情包：{_emo_name}")
                 messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                  "content": "表情包已选定，会随你的文字回复一起发出，请正常给出文字回复，不要在文字里描述该图片。"})
+                continue
+
+            # 查群成员
+            if _tool_name == "query_group_member":
+                try:
+                    _qname = json.loads(tool_call["function"]["arguments"]).get("name", "")
+                except Exception:
+                    _qname = ""
+                if _qname and is_group:
+                    print(f"👥 [视觉]AI查询群成员：{_qname}")
+                    _mems = _query_group_member_sync(obj_id, _qname)
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _mems})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "查询失败：未提供名称或非群聊"})
+                continue
+
+            # 群管理工具
+            if _tool_name == "group_moderation":
+                try:
+                    _gargs = json.loads(tool_call["function"]["arguments"])
+                    _action = str(_gargs.get("action", "")).strip()
+                    _uid = int(_gargs.get("user_id", 0) or 0)
+                    _dur = int(_gargs.get("duration_minutes", 10) or 10)
+                    _rej = bool(_gargs.get("reject_add", False))
+                    _reason = str(_gargs.get("reason", ""))
+                except Exception:
+                    _action, _uid, _dur, _rej, _reason = "", 0, 10, False, ""
+                if _action and is_group:
+                    print(f"🛡️ [视觉]AI下发群管理动作: {_action} uid={_uid} dur={_dur}m rej={_rej}")
+                    _gr = _sync_group_mod(obj_id, _action, _uid, _dur, _rej, _reason)
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _gr})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "群管理工具仅在群聊中可用"})
+                continue
+
+            # 语音工具
+            if _tool_name == "send_voice":
+                try:
+                    _vtext = str(json.loads(tool_call["function"]["arguments"]).get("text", "")).strip()
+                except Exception:
+                    _vtext = ""
+                if _vtext:
+                    print(f"🔊 [视觉]AI调用语音: {_vtext[:40]}")
+                    _vok = _sync_send_voice(obj_id, is_group, _vtext)
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "✅ 语音已发送" if _vok else "❌ 语音发送失败"})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "❌ text参数为空"})
+                continue
+
+            # 文生图工具
+            if _tool_name == "generate_image":
+                try:
+                    _gd = json.loads(tool_call["function"]["arguments"])
+                    _gprompt = str(_gd.get("prompt", "")).strip()
+                    _gratio = str(_gd.get("aspect_ratio") or MINIMAX_IMAGE_RATIO).strip()
+                    _use_ref = bool(_gd.get("use_reference", False))
+                except Exception:
+                    _gprompt, _gratio, _use_ref = "", MINIMAX_IMAGE_RATIO, False
+                if _gprompt:
+                    _gref = _LAST_IMAGE_URLS.get(obj_id, "") if _use_ref else ""
+                    if _use_ref and not _gref:
+                        print("⚠️ [视觉]AI要求参考图但无图片缓存")
+                    print(f"🖼️ [视觉]AI调用文生图: [{_gratio}] {_gprompt[:60]}" + (f" ref=自动拉取" if _gref else " (纯文生图)"))
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _gref)
+                    if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
+                        _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
+                    else:
+                        _gresult = "✅ 图片已生成并发送" if _gok else "❌ 图片生成失败,请用文字回复"
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _gresult})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": "❌ prompt参数为空"})
+                continue
+
+            if _tool_name == "post_qzone":
+                try:
+                    _qzc = str(json.loads(tool_call["function"]["arguments"]).get("content", "")).strip()
+                except Exception:
+                    _qzc = ""
+                if _qzc:
+                    print(f"📢 AI调用发空间说说: {_qzc[:60]}")
+                    _qzok = _sync_post_qzone(_qzc)
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "✅ 说说已发布到QQ空间" if _qzok else "❌ 说说发布失败"})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ content为空,未发布说说"})
                 continue
 
             try:
@@ -3868,13 +4790,10 @@ def spawn_link_download(websocket, chat_id, is_group, url, kind):
 async def get_reply_message(ws, message_id):
     """调用OneBot API根据消息ID获取被回复的消息内容"""
     try:
-        payload = {
-            "action": "get_msg",
-            "params": {"message_id": message_id},
-            "echo": f"get_msg_{message_id}"
-        }
-        await ws.send(json.dumps(payload))
-        # 简单等待返回（这里用同步方式拿不到，先返回None避免报错，后面再改异步）
+        resp = await api_call(ws, "get_msg", {"message_id": message_id}, timeout=10)
+        if resp and resp.get("retcode") == 0:
+            return resp.get("data", {})
+        print(f"获取回复消息失败: retcode={resp.get('retcode') if resp else '无响应'}")
         return None
     except Exception as e:
         print(f"获取回复消息失败：{e}")
@@ -3982,6 +4901,9 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
         global _random_follow_up_count, _random_followup_ts
         _random_follow_up_count = FOLLOW_UP_TRIGGER_COUNT
         _random_followup_ts = time.time()
+
+    # 主动消息：任何群/私聊正常API对话完成，重置全局静默计时（回到idle）
+    _pro_reset_by_api()
 
 
 async def _merge_worker(ws, chat_id, is_group):
@@ -4110,6 +5032,13 @@ async def main():
         asyncio.create_task(_group_members_refresh_loop(ws))
         print("👥 群成员自动获取已开启（启动拉取+每小时刷新）")
         print(f"💬 自由聊天：开关={'开' if ENABLE_RANDOM_CHAT else '关'}，触发概率={CHAT_TRIGGER_PROBABILITY:.0%}，回复后延续{FOLLOW_UP_TRIGGER_COUNT}条")
+        # AI主动消息常驻协程（静默→随机延迟→AI选目标找话题→冷却 循环）
+        if ENABLE_PROACTIVE_MSG:
+            _pro_task = asyncio.create_task(_proactive_loop(ws))
+            _bg_tasks.add(_pro_task)
+            _pro_task.add_done_callback(_bg_tasks.discard)
+        else:
+            print("🔕 主动消息：关闭")
 
         # 启动清理：只删自己遗留的待传临时文件（只跑一次，重连不重复）
         if delivery_mode() != "native":
@@ -4165,6 +5094,19 @@ async def main():
 
         dispatcher_task = asyncio.create_task(dispatcher())
 
+        # dispatcher已启动，现在可以安全调用OneBot API获取机器人QQ号
+        global BOT_QQ
+        try:
+            _login_resp = await api_call(ws, "get_login_info", {}, timeout=10)
+            if _login_resp and _login_resp.get("retcode") == 0:
+                BOT_QQ = _login_resp["data"].get("user_id")
+                _bot_nick = _login_resp["data"].get("nickname", "")
+                print(f"🤖 机器人身份：QQ={BOT_QQ} 昵称={_bot_nick} 配置名={BOT_NAME}")
+            else:
+                print(f"⚠️ 获取机器人QQ号失败：{_login_resp}")
+        except Exception as _e:
+            print(f"⚠️ 获取机器人QQ号异常：{_e}")
+
         try:
             while True:
                 data = await event_queue.get()
@@ -4201,6 +5143,10 @@ async def main():
                     is_group = False
                 else:
                     continue
+
+                # 主动消息钩子：每条真人消息更新目标活跃时间（AI回不回都记），被排除目标因此恢复
+                if user_id != self_id:
+                    _pro_mark_human(f"g{chat_id}" if is_group else f"p{chat_id}")
 
                 # ===== 汽水音乐VIP试听确认：用户回复"1"→发送挂起的试听音频文件（过期清理由后台任务负责） =====
                 _pend = _qishui_pending.get(chat_id)
@@ -4250,8 +5196,40 @@ async def main():
                         await handle_download_command(ws, chat_id, aid, is_group, chapter)
                     continue
 
+                # ===== 文生图命令拦截: /生成图片 [16.9] 提示词(不需要@) =====
+                if ENABLE_IMAGE_COMMAND:
+                    _img_text = re.sub(r"\[CQ:[^]]*\]", "", cq_msg).strip()
+                    if _img_text.startswith("/生成图片"):
+                        _ratio, _prompt = _parse_image_command(_img_text)
+                        if not _prompt:
+                            _tip = "格式：/生成图片 一只猫  或  /生成图片 16.9 一只猫（比例用小数点，16.9=16:9）"
+                            if is_group:
+                                await send_group_msg(ws, chat_id, _tip)
+                            else:
+                                await send_private_msg(ws, chat_id, _tip)
+                        else:
+                            _use_ratio = _ratio or MINIMAX_IMAGE_RATIO
+                            # 消息里带图片就用最后一张作为参考图(图生图)
+                            _cmd_imgs = extract_images_from_message(cq_msg)
+                            _ref_img = _cmd_imgs[-1] if _cmd_imgs else ""
+                            _wait = f"正在生成图片（{_use_ratio}），稍等..." + ("（已带参考图）" if _ref_img else "")
+                            if is_group:
+                                await send_group_msg(ws, chat_id, _wait)
+                            else:
+                                await send_private_msg(ws, chat_id, _wait)
+                            _ok, _ = await _generate_and_send_image(ws, chat_id, is_group, _prompt, _use_ratio, _ref_img)
+                            if not _ok:
+                                _fail = "图片生成失败，请检查MiniMax API Key或稍后重试"
+                                if is_group:
+                                    await send_group_msg(ws, chat_id, _fail)
+                                else:
+                                    await send_private_msg(ws, chat_id, _fail)
+                        continue
+
                 # ===== 图片提前提取+缓存（在@判断之前，手机端可先不@只发图）=====
                 image_urls = extract_images_from_message(cq_msg)
+                if image_urls:
+                    _LAST_IMAGE_URLS[chat_id] = image_urls[-1]  # 记录最后一张图供图生图工具使用
                 # 视频提取（群成员发的视频消息）
                 video_urls = extract_videos_from_message(cq_msg)
                 # CQ:file 文件形式发的视频（私聊常见，无 url= 只有 file_id），调 get_file API 补链接
@@ -4668,9 +5646,15 @@ def _load_config_file():
     global ENABLE_THINKING_CHAT, ENABLE_THINKING_VISION, REASONING_EFFORT
     global ENABLE_GROUP_MODERATION
     global ENABLE_VOICE_TOOL
+    global MINIMAX_API_KEY, MINIMAX_IMAGE_MODEL, MINIMAX_IMAGE_RATIO, MINIMAX_PROMPT_OPTIMIZER
+    global ENABLE_IMAGE_COMMAND, ENABLE_IMAGE_TOOL
+    global IMAGE_TOOL_RETURN_IMAGE
     global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX
     global ENABLE_SPLIT_REPLY, SPLIT_DELAY_MIN, SPLIT_DELAY_MAX, SPLIT_MAX_PARTS, SPLIT_PART_MAX_LEN
     global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY, FOLLOW_UP_TRIGGER_COUNT, FOLLOW_UP_WINDOW_SECONDS
+    global ENABLE_PROACTIVE_MSG, ENABLE_PROACTIVE_PRIVATE, ENABLE_PROACTIVE_QZONE, PROACTIVE_IDLE_SECONDS, PROACTIVE_RANDOM_MAX
+    global PROACTIVE_COOLDOWN_BASE, PROACTIVE_COOLDOWN_RANDOM, PROACTIVE_GROUP_GIVEUP, PROACTIVE_PRIVATE_GIVEUP
+    global PROACTIVE_DEAD_SECONDS, PROACTIVE_ACTIVE_PROTECT
     global PEAK_PERIOD_NAME, OFFPEAK_PERIOD_NAME
     global ENABLE_MEMORY, MEMORY_CONTEXT_TURNS, MEMORY_FILE, memory_store
     global MEMORY_INJECT_PROMPT
@@ -4678,7 +5662,7 @@ def _load_config_file():
     global ENABLE_EMOJI, EMOJI_DIR, EMOJI_MAP
     global ENABLE_VIDEO, ENABLE_VOICE
     global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT
-    global ENABLE_TTS, TTS_ENGINE, TTS_VOICE, VOLC_API_KEY, VOLC_VOICE
+    global ENABLE_TTS, TTS_ENGINE, TTS_VOICE, VOLC_API_KEY, VOLC_VOICE, MINIMAX_TTS_MODEL, MINIMAX_TTS_VOICE, MINIMAX_TTS_SPEED, MINIMAX_TTS_VOL, MINIMAX_TTS_PITCH, BOT_NAME
 
     # onebot_ws：环境变量优先（Docker compose 里用它指向 napcat:6700，yml里可保持127.0.0.1给本机用）
     ONEBOT_WS = os.environ.get("QQ2_ONEBOT_WS") or s("onebot_ws", ONEBOT_WS)
@@ -4731,6 +5715,22 @@ def _load_config_file():
     if FOLLOW_UP_TRIGGER_COUNT < 0: FOLLOW_UP_TRIGGER_COUNT = 0
     FOLLOW_UP_WINDOW_SECONDS = i("follow_up_window_seconds", FOLLOW_UP_WINDOW_SECONDS)
     if FOLLOW_UP_WINDOW_SECONDS < 0: FOLLOW_UP_WINDOW_SECONDS = 0
+    # AI主动消息
+    ENABLE_PROACTIVE_MSG = b("enable_proactive_msg", ENABLE_PROACTIVE_MSG)
+    ENABLE_PROACTIVE_PRIVATE = b("enable_proactive_private", ENABLE_PROACTIVE_PRIVATE)
+    ENABLE_PROACTIVE_QZONE = b("enable_proactive_qzone", ENABLE_PROACTIVE_QZONE)
+    PROACTIVE_IDLE_SECONDS = i("proactive_idle_seconds", PROACTIVE_IDLE_SECONDS)
+    PROACTIVE_RANDOM_MAX = i("proactive_random_max", PROACTIVE_RANDOM_MAX)
+    PROACTIVE_COOLDOWN_BASE = i("proactive_cooldown_base", PROACTIVE_COOLDOWN_BASE)
+    PROACTIVE_COOLDOWN_RANDOM = i("proactive_cooldown_random", PROACTIVE_COOLDOWN_RANDOM)
+    PROACTIVE_GROUP_GIVEUP = i("proactive_group_giveup", PROACTIVE_GROUP_GIVEUP)
+    PROACTIVE_PRIVATE_GIVEUP = i("proactive_private_giveup", PROACTIVE_PRIVATE_GIVEUP)
+    PROACTIVE_DEAD_SECONDS = i("proactive_dead_seconds", PROACTIVE_DEAD_SECONDS)
+    PROACTIVE_ACTIVE_PROTECT = i("proactive_active_protect", PROACTIVE_ACTIVE_PROTECT)
+    for _pv in (PROACTIVE_IDLE_SECONDS, PROACTIVE_RANDOM_MAX, PROACTIVE_COOLDOWN_BASE, PROACTIVE_COOLDOWN_RANDOM, PROACTIVE_DEAD_SECONDS, PROACTIVE_ACTIVE_PROTECT):
+        if _pv < 0: _pv = 0
+    if PROACTIVE_GROUP_GIVEUP < 1: PROACTIVE_GROUP_GIVEUP = 1
+    if PROACTIVE_PRIVATE_GIVEUP < 1: PROACTIVE_PRIVATE_GIVEUP = 1
     # 峰谷时段自定义显示名（如高峰="梁文峰"、空闲="梁文谷"；留空则用默认"高峰"/"空闲"）
     _peak_name = s("peak_period_name", PEAK_PERIOD_NAME)
     _offpeak_name = s("offpeak_period_name", OFFPEAK_PERIOD_NAME)
@@ -4766,6 +5766,13 @@ def _load_config_file():
     ENABLE_EMOJI = b("enable_emoji", ENABLE_EMOJI)
     ENABLE_GROUP_MODERATION = b("enable_group_moderation", ENABLE_GROUP_MODERATION)
     ENABLE_VOICE_TOOL = b("enable_voice_tool", ENABLE_VOICE_TOOL)
+    MINIMAX_API_KEY = s("minimax_api_key", MINIMAX_API_KEY)
+    MINIMAX_IMAGE_MODEL = s("minimax_image_model", MINIMAX_IMAGE_MODEL)
+    MINIMAX_IMAGE_RATIO = s("minimax_image_ratio", MINIMAX_IMAGE_RATIO)
+    MINIMAX_PROMPT_OPTIMIZER = s("minimax_prompt_optimizer", MINIMAX_PROMPT_OPTIMIZER)
+    ENABLE_IMAGE_COMMAND = b("enable_image_command", ENABLE_IMAGE_COMMAND)
+    ENABLE_IMAGE_TOOL = b("enable_image_tool", ENABLE_IMAGE_TOOL)
+    IMAGE_TOOL_RETURN_IMAGE = b("image_tool_return_image", IMAGE_TOOL_RETURN_IMAGE)
     _emo_dir = os.environ.get("QQ2_EMOJI_DIR") or s("emoji_dir", "")
     if not _emo_dir:
         _cand = os.path.join(script_dir, "表情包")
@@ -4793,9 +5800,17 @@ def _load_config_file():
         TTS_ENGINE = _tts_engine
     VOLC_API_KEY = s("volc_api_key", VOLC_API_KEY)
     VOLC_VOICE = s("volc_voice", VOLC_VOICE)
+    # MiniMax TTS配置
+    MINIMAX_TTS_MODEL = s("minimax_tts_model", MINIMAX_TTS_MODEL)
+    MINIMAX_TTS_VOICE = s("minimax_tts_voice", MINIMAX_TTS_VOICE)
+    MINIMAX_TTS_SPEED = float(s("minimax_tts_speed", str(MINIMAX_TTS_SPEED)))
+    MINIMAX_TTS_VOL = float(s("minimax_tts_vol", str(MINIMAX_TTS_VOL)))
+    MINIMAX_TTS_PITCH = int(s("minimax_tts_pitch", str(MINIMAX_TTS_PITCH)))
     if ENABLE_TTS:
         if TTS_ENGINE == "volc" and VOLC_API_KEY:
             print(f"🎙️ AI回复转语音已开启：火山引擎 音色={VOLC_VOICE}")
+        elif TTS_ENGINE == "minimax" and MINIMAX_API_KEY:
+            print(f"🎙️ AI回复转语音已开启：MiniMax 模型={MINIMAX_TTS_MODEL} 音色={MINIMAX_TTS_VOICE}")
         else:
             print(f"🎙️ AI回复转语音已开启：edge-tts 音色={TTS_VOICE}")
     ENABLE_MERGE = b("enable_message_merge", ENABLE_MERGE)
@@ -4807,6 +5822,7 @@ def _load_config_file():
         print(f"🎙️ 语音转文字已开启：群里发语音自动转写→@时把语音内容投给语言模型")
 
     SYSTEM_PROMPT = s("system_prompt", SYSTEM_PROMPT)
+    BOT_NAME = s("bot_name", BOT_NAME)
     DEFAULT_CHAPTER = i("default_chapter", DEFAULT_CHAPTER)
 
     # 下载/打包相关（download_root 同样环境变量优先，Docker里由compose指到/data）

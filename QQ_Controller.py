@@ -432,9 +432,9 @@ def _edit_config(mutator):
 
 
 def _get_system_prompt():
-    """读取系统提示词"""
+    """读取系统提示词和bot_name"""
     cfg = _app_config()
-    return cfg.get("system_prompt", "")
+    return {"prompt": cfg.get("system_prompt", ""), "bot_name": cfg.get("bot_name", "DeepSeek")}
 
 
 def _get_connection_config():
@@ -468,12 +468,7 @@ def _get_model_config():
         "deepseek_vision_model": cfg.get("deepseek_vision_model", "deepseek-flash"),
         "bocha_api_key": "",  # 不回显
         "has_bocha_api_key": _has_secret(cfg.get("bocha_api_key")),
-        "enable_thinking_chat": cfg.get("enable_thinking_chat", True),
-        "enable_thinking_vision": cfg.get("enable_thinking_vision", True),
         "reasoning_effort": cfg.get("reasoning_effort", "high"),
-        "use_chat_model_for_vision": cfg.get("use_chat_model_for_vision", True),
-        "enable_web_search": cfg.get("enable_web_search", True),
-        "search_result_num": cfg.get("search_result_num", 3),
         "max_context_len": cfg.get("max_context_len", 8),
         "enable_tts": cfg.get("enable_tts", True),
         "tts_engine": cfg.get("tts_engine", "volc"),
@@ -481,6 +476,68 @@ def _get_model_config():
         "volc_api_key": "",  # 不回显
         "has_volc_api_key": _has_secret(cfg.get("volc_api_key")),
         "volc_voice": cfg.get("volc_voice", ""),
+        "minimax_api_key": "",  # 不回显
+        "has_minimax_api_key": _has_secret(cfg.get("minimax_api_key")),
+        "minimax_image_model": cfg.get("minimax_image_model", "image-01"),
+        "minimax_image_ratio": cfg.get("minimax_image_ratio", "1:1"),
+        "enable_image_command": cfg.get("enable_image_command", True),
+        "enable_image_tool": cfg.get("enable_image_tool", True),
+        "minimax_tts_model": cfg.get("minimax_tts_model", "speech-2.8-hd"),
+        "minimax_tts_voice": cfg.get("minimax_tts_voice", "Chinese (Mandarin)_Crisp_Girl"),
+        "minimax_tts_speed": cfg.get("minimax_tts_speed", 1.0),
+        "minimax_tts_vol": cfg.get("minimax_tts_vol", 1.0),
+        "minimax_tts_pitch": cfg.get("minimax_tts_pitch", 0),
+        "bot_name": cfg.get("bot_name", "DeepSeek"),
+    }
+
+
+def _get_features_config():
+    """读取功能开关配置（对话行为/消息处理/多媒体/群管理）"""
+    cfg = _app_config()
+    return {
+        # 对话行为
+        "enable_web_search": cfg.get("enable_web_search", True),
+        "search_result_num": cfg.get("search_result_num", 8),
+        "enable_thinking_chat": cfg.get("enable_thinking_chat", True),
+        "enable_thinking_vision": cfg.get("enable_thinking_vision", True),
+        "use_chat_model_for_vision": cfg.get("use_chat_model_for_vision", True),
+        "enable_memory": cfg.get("enable_memory", True),
+        "memory_context_turns": cfg.get("memory_context_turns", 8),
+        "enable_ambient_cache": cfg.get("enable_ambient_cache", True),
+        "ambient_max_msgs": cfg.get("ambient_max_msgs", 10),
+        # 消息处理
+        "enable_message_merge": cfg.get("enable_message_merge", True),
+        "merge_wait_seconds": cfg.get("merge_wait_seconds", 20),
+        "merge_max_count": cfg.get("merge_max_count", 10),
+        "enable_random_chat": cfg.get("enable_random_chat", True),
+        "chat_trigger_probability": cfg.get("chat_trigger_probability", 0.3),
+        "follow_up_trigger_count": cfg.get("follow_up_trigger_count", 3),
+        "enable_split_reply": cfg.get("enable_split_reply", True),
+        "enable_send_delay": cfg.get("enable_send_delay", True),
+        # 多媒体
+        "enable_video": cfg.get("enable_video", True),
+        "enable_voice": cfg.get("enable_voice", True),
+        "enable_emoji": cfg.get("enable_emoji", True),
+        "enable_image_command": cfg.get("enable_image_command", True),
+        "enable_image_tool": cfg.get("enable_image_tool", True),
+        "enable_download": cfg.get("enable_download", True),
+        # 群与其他
+        "enable_group_moderation": cfg.get("enable_group_moderation", True),
+        "enable_voice_tool": cfg.get("enable_voice_tool", True),
+        "enable_notify": cfg.get("enable_notify", False),
+        "welcome_new_member": cfg.get("welcome_new_member", True),
+        # AI主动消息
+        "enable_proactive_msg": cfg.get("enable_proactive_msg", False),
+        "enable_proactive_private": cfg.get("enable_proactive_private", True),
+        "enable_proactive_qzone": cfg.get("enable_proactive_qzone", False),
+        "proactive_idle_seconds": cfg.get("proactive_idle_seconds", 3600),
+        "proactive_random_max": cfg.get("proactive_random_max", 3600),
+        "proactive_cooldown_base": cfg.get("proactive_cooldown_base", 5400),
+        "proactive_cooldown_random": cfg.get("proactive_cooldown_random", 5400),
+        "proactive_group_giveup": cfg.get("proactive_group_giveup", 2),
+        "proactive_private_giveup": cfg.get("proactive_private_giveup", 1),
+        "proactive_dead_seconds": cfg.get("proactive_dead_seconds", 43200),
+        "proactive_active_protect": cfg.get("proactive_active_protect", 300),
     }
 
 
@@ -494,30 +551,105 @@ def _save_model_config(data):
         if "deepseek_vision_model" in data: cfg["deepseek_vision_model"] = str(data["deepseek_vision_model"]); changed = True
         if _apply_secret(cfg, "bocha_api_key", data.get("bocha_api_key")):
             changed = True
-        if "enable_thinking_chat" in data: cfg["enable_thinking_chat"] = bool(data["enable_thinking_chat"]); changed = True
-        if "enable_thinking_vision" in data: cfg["enable_thinking_vision"] = bool(data["enable_thinking_vision"]); changed = True
         if "reasoning_effort" in data:
             eff = str(data["reasoning_effort"])
-            cfg["reasoning_effort"] = eff if eff in ("low", "medium", "high") else "high"
+            cfg["reasoning_effort"] = eff if eff in ("off", "low", "medium", "high") else "high"
             changed = True
-        if "use_chat_model_for_vision" in data: cfg["use_chat_model_for_vision"] = bool(data["use_chat_model_for_vision"]); changed = True
-        if "enable_web_search" in data: cfg["enable_web_search"] = bool(data["enable_web_search"]); changed = True
-        if "search_result_num" in data:
-            cfg["search_result_num"] = _clamp_int(data["search_result_num"], 0, 10, 3); changed = True
         if "max_context_len" in data:
             cfg["max_context_len"] = _clamp_int(data["max_context_len"], 1, 60, 8); changed = True
         if "enable_tts" in data: cfg["enable_tts"] = bool(data["enable_tts"]); changed = True
         if "tts_engine" in data:
             eng = str(data["tts_engine"])
-            cfg["tts_engine"] = eng if eng in ("volc", "edge", "none") else "volc"
+            cfg["tts_engine"] = eng if eng in ("volc", "edge", "minimax", "none") else "volc"
             changed = True
         if "tts_voice" in data: cfg["tts_voice"] = str(data["tts_voice"]); changed = True
         if _apply_secret(cfg, "volc_api_key", data.get("volc_api_key")):
             changed = True
         if "volc_voice" in data: cfg["volc_voice"] = str(data["volc_voice"]); changed = True
+        if _apply_secret(cfg, "minimax_api_key", data.get("minimax_api_key")):
+            changed = True
+        if "minimax_image_model" in data: cfg["minimax_image_model"] = str(data["minimax_image_model"]); changed = True
+        if "minimax_image_ratio" in data:
+            r = str(data["minimax_image_ratio"])
+            cfg["minimax_image_ratio"] = r if r in ("1:1", "16:9", "9:16", "4:3", "3:4") else "1:1"
+            changed = True
+        if "enable_image_command" in data: cfg["enable_image_command"] = bool(data["enable_image_command"]); changed = True
+        if "enable_image_tool" in data: cfg["enable_image_tool"] = bool(data["enable_image_tool"]); changed = True
+        if "minimax_tts_model" in data:
+            m = str(data["minimax_tts_model"])
+            cfg["minimax_tts_model"] = m if m in ("speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo") else "speech-2.8-hd"
+            changed = True
+        if "minimax_tts_voice" in data: cfg["minimax_tts_voice"] = str(data["minimax_tts_voice"]); changed = True
+        if "minimax_tts_speed" in data: cfg["minimax_tts_speed"] = float(data["minimax_tts_speed"]); changed = True
+        if "minimax_tts_vol" in data: cfg["minimax_tts_vol"] = float(data["minimax_tts_vol"]); changed = True
+        if "minimax_tts_pitch" in data: cfg["minimax_tts_pitch"] = int(data["minimax_tts_pitch"]); changed = True
+        if "bot_name" in data: cfg["bot_name"] = str(data["bot_name"]); changed = True
         return changed
 
     return _edit_config(_mutate)
+
+def _save_features_config(data):
+    """保存功能开关配置（只写白名单键）"""
+    def _b(key, dft=True):
+        return bool(data.get(key, dft))
+    def _mutate(cfg):
+        changed = False
+        # 对话行为
+        if "enable_web_search" in data: cfg["enable_web_search"] = _b("enable_web_search"); changed = True
+        if "search_result_num" in data: cfg["search_result_num"] = _clamp_int(data["search_result_num"], 1, 20, 8); changed = True
+        if "enable_thinking_chat" in data: cfg["enable_thinking_chat"] = _b("enable_thinking_chat"); changed = True
+        if "enable_thinking_vision" in data: cfg["enable_thinking_vision"] = _b("enable_thinking_vision"); changed = True
+        if "use_chat_model_for_vision" in data: cfg["use_chat_model_for_vision"] = _b("use_chat_model_for_vision"); changed = True
+        if "enable_memory" in data: cfg["enable_memory"] = _b("enable_memory"); changed = True
+        if "memory_context_turns" in data: cfg["memory_context_turns"] = _clamp_int(data["memory_context_turns"], 1, 30, 8); changed = True
+        if "enable_ambient_cache" in data: cfg["enable_ambient_cache"] = _b("enable_ambient_cache"); changed = True
+        if "ambient_max_msgs" in data: cfg["ambient_max_msgs"] = _clamp_int(data["ambient_max_msgs"], 1, 50, 10); changed = True
+        # 消息处理
+        if "enable_message_merge" in data: cfg["enable_message_merge"] = _b("enable_message_merge"); changed = True
+        if "merge_wait_seconds" in data: cfg["merge_wait_seconds"] = _clamp_int(data["merge_wait_seconds"], 5, 120, 20); changed = True
+        if "merge_max_count" in data: cfg["merge_max_count"] = _clamp_int(data["merge_max_count"], 2, 30, 10); changed = True
+        if "enable_random_chat" in data: cfg["enable_random_chat"] = _b("enable_random_chat"); changed = True
+        if "chat_trigger_probability" in data:
+            p = float(data["chat_trigger_probability"])
+            cfg["chat_trigger_probability"] = max(0.0, min(1.0, p)); changed = True
+        if "follow_up_trigger_count" in data: cfg["follow_up_trigger_count"] = _clamp_int(data["follow_up_trigger_count"], 0, 10, 3); changed = True
+        if "enable_split_reply" in data: cfg["enable_split_reply"] = _b("enable_split_reply"); changed = True
+        if "enable_send_delay" in data: cfg["enable_send_delay"] = _b("enable_send_delay"); changed = True
+        # 多媒体
+        if "enable_video" in data: cfg["enable_video"] = _b("enable_video"); changed = True
+        if "enable_voice" in data: cfg["enable_voice"] = _b("enable_voice"); changed = True
+        if "enable_emoji" in data: cfg["enable_emoji"] = _b("enable_emoji"); changed = True
+        if "enable_image_command" in data: cfg["enable_image_command"] = _b("enable_image_command"); changed = True
+        if "enable_image_tool" in data: cfg["enable_image_tool"] = _b("enable_image_tool"); changed = True
+        if "enable_download" in data: cfg["enable_download"] = _b("enable_download"); changed = True
+        # 群与其他
+        if "enable_group_moderation" in data: cfg["enable_group_moderation"] = _b("enable_group_moderation"); changed = True
+        if "enable_voice_tool" in data: cfg["enable_voice_tool"] = _b("enable_voice_tool"); changed = True
+        if "enable_notify" in data: cfg["enable_notify"] = _b("enable_notify", False); changed = True
+        if "welcome_new_member" in data: cfg["welcome_new_member"] = _b("welcome_new_member"); changed = True
+        # AI主动消息（时间单位秒；次数整数）
+        if "enable_proactive_msg" in data: cfg["enable_proactive_msg"] = _b("enable_proactive_msg"); changed = True
+        if "enable_proactive_private" in data: cfg["enable_proactive_private"] = _b("enable_proactive_private"); changed = True
+        if "enable_proactive_qzone" in data: cfg["enable_proactive_qzone"] = _b("enable_proactive_qzone"); changed = True
+        if "proactive_idle_seconds" in data:
+            cfg["proactive_idle_seconds"] = _clamp_int(data["proactive_idle_seconds"], 60, 86400, 3600); changed = True
+        if "proactive_random_max" in data:
+            cfg["proactive_random_max"] = _clamp_int(data["proactive_random_max"], 0, 86400, 3600); changed = True
+        if "proactive_cooldown_base" in data:
+            cfg["proactive_cooldown_base"] = _clamp_int(data["proactive_cooldown_base"], 0, 86400, 5400); changed = True
+        if "proactive_cooldown_random" in data:
+            cfg["proactive_cooldown_random"] = _clamp_int(data["proactive_cooldown_random"], 0, 86400, 5400); changed = True
+        if "proactive_group_giveup" in data:
+            cfg["proactive_group_giveup"] = _clamp_int(data["proactive_group_giveup"], 1, 10, 2); changed = True
+        if "proactive_private_giveup" in data:
+            cfg["proactive_private_giveup"] = _clamp_int(data["proactive_private_giveup"], 1, 10, 1); changed = True
+        if "proactive_dead_seconds" in data:
+            cfg["proactive_dead_seconds"] = _clamp_int(data["proactive_dead_seconds"], 0, 604800, 43200); changed = True
+        if "proactive_active_protect" in data:
+            cfg["proactive_active_protect"] = _clamp_int(data["proactive_active_protect"], 0, 3600, 300); changed = True
+        return changed
+    return _edit_config(_mutate)
+
 
 
 def _save_connection_config(data):
@@ -555,17 +687,21 @@ def _save_connection_config(data):
     return _edit_config(_mutate)
 
 
-def _save_system_prompt(prompt_text):
-    """保存系统提示词（原子写入、保留注释）"""
+def _save_system_prompt(prompt_text, bot_name=None):
+    """保存系统提示词和bot_name（原子写入、保留注释）"""
     text = str(prompt_text or "")
     if len(text) > 200000:  # 上限，防止写爆配置文件
         return False, "提示词过长（上限 200000 字符）"
 
     def _mutate(data):
-        if data.get("system_prompt") == text:
-            return False
-        data["system_prompt"] = text
-        return True
+        changed = False
+        if data.get("system_prompt") != text:
+            data["system_prompt"] = text
+            changed = True
+        if bot_name is not None and str(bot_name).strip():
+            data["bot_name"] = str(bot_name).strip()
+            changed = True
+        return changed
 
     return _edit_config(_mutate)
 
@@ -1385,11 +1521,14 @@ class _WebUIHandler(BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._json(200, {"ok": True, "webui": True, "ws_connected": _active_ws is not None})
         elif path == "/api/config/prompt":
-            self._json(200, {"ok": True, "prompt": _get_system_prompt()})
+            _sp = _get_system_prompt()
+            self._json(200, {"ok": True, "prompt": _sp["prompt"], "bot_name": _sp["bot_name"]})
         elif path == "/api/config/connection":
             self._json(200, {"ok": True, "config": _get_connection_config()})
         elif path == "/api/config/model":
             self._json(200, {"ok": True, "config": _get_model_config()})
+        elif path == "/api/config/features":
+            self._json(200, {"ok": True, "config": _get_features_config()})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 
@@ -1436,7 +1575,8 @@ class _WebUIHandler(BaseHTTPRequestHandler):
             body = {}
         if path == "/api/config/prompt":
             prompt_text = str(body.get("prompt") or "")
-            ok, err = _save_system_prompt(prompt_text)
+            bot_name = body.get("bot_name")
+            ok, err = _save_system_prompt(prompt_text, bot_name)
             self._json(200 if ok else 500, {"ok": ok, "error": err})
             return
         if path == "/api/config/connection":
@@ -1445,6 +1585,10 @@ class _WebUIHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/config/model":
             ok, err = _save_model_config(body)
+            self._json(200 if ok else 500, {"ok": ok, "error": err})
+            return
+        if path == "/api/config/features":
+            ok, err = _save_features_config(body)
             self._json(200 if ok else 500, {"ok": ok, "error": err})
             return
         if path == "/api/restart":

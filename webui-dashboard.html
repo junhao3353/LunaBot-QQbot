@@ -369,6 +369,22 @@
       border-color: #a78bfa !important;
       box-shadow: 0 0 0 3px rgba(167,139,250,0.15) !important;
     }
+
+    /* 胶囊开关 */
+    .pill { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
+    .pill input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .pill-slider { position: absolute; inset: 0; background: rgba(255,255,255,.15); border-radius: 26px; transition: .2s; cursor: pointer; }
+    .pill-slider:before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 2px 4px rgba(0,0,0,.3); }
+    .pill input:checked + .pill-slider { background: linear-gradient(135deg,#7c5cff,#5b8cff); }
+    .pill input:checked + .pill-slider:before { transform: translateX(20px); }
+    .pill input:focus-visible + .pill-slider { outline: 2px solid #7c5cff; outline-offset: 2px; }
+    /* 功能页行布局 */
+    .feat-row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .feat-row:last-child { border-bottom: none; }
+    .feat-label { flex: 1; font-size: 15px; color: #e8eaf0; }
+    .feat-param { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .feat-param > label { font-size: 13px; color: #9aa0b4; white-space: nowrap; }
+    .feat-param > input { width: 90px; }
 </style>
 </head>
 <body>
@@ -378,10 +394,10 @@
       <a class="navbar-brand mb-5" href="#" style="margin-left:2.75rem;margin-top:0.5rem;"><span class="text-gradient">LunaBot</span></a>
       <a class="nav-link active" href="#" data-page="dashboard" draggable="false" ondragstart="event.preventDefault();return false;">仪表盘</a>
       <a class="nav-link" href="#" data-page="models" draggable="false" ondragstart="event.preventDefault();return false;">模型管理</a>
+      <a class="nav-link" href="#" data-page="features" draggable="false" ondragstart="event.preventDefault();return false;">功能设置</a>
       <a class="nav-link" href="#" data-page="prompt" draggable="false" ondragstart="event.preventDefault();return false;">系统提示词</a>
       <a class="nav-link" href="#" data-page="connection" draggable="false" ondragstart="event.preventDefault();return false;">连接设置</a>
       <a class="nav-link" href="#" data-page="download" draggable="false" ondragstart="event.preventDefault();return false;">下载设置</a>
-      <a class="nav-link" href="#" data-page="features" draggable="false" ondragstart="event.preventDefault();return false;">功能设置</a>
       <a class="nav-link" href="#" data-page="whitelist" draggable="false" ondragstart="event.preventDefault();return false;">白名单</a>
       <a class="nav-link" href="#" data-page="logs" draggable="false" ondragstart="event.preventDefault();return false;">实时日志</a>
       <a class="nav-link" href="#" data-page="webui" draggable="false" ondragstart="event.preventDefault();return false;">WebUI设置</a>
@@ -444,12 +460,15 @@
 
       <!-- 系统提示词页面 -->
       <div id="page-prompt" class="page-content" style="display:none;">
-        <div class="d-flex align-items-center justify-content-between mb-5 flex-wrap gap-3">
+        <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-3">
           <div>
             <h1 class="h2 mb-1">系统提示词</h1>
             <p class="text-muted mb-0">编辑AI人设和说话风格，保存后需重启生效</p>
           </div>
           <button class="btn btn-gradient-primary btn-lg" onclick="savePrompt()" style="font-weight:700;">保存提示词</button>
+        </div>
+        <div class="d-flex mb-4">
+          <input type="text" class="form-control" id="promptBotName" placeholder="名字" style="width:220px;">
         </div>
         <div class="card"><div class="card-body">
           <textarea id="promptEditor" class="form-control" draggable="false" ondragstart="event.preventDefault(); event.stopPropagation(); return false;" ondrop="event.preventDefault(); return false;" style="width:100%; min-height:500px; font-family:Consolas, monospace; font-size:.9rem; line-height:1.6; resize:none; -webkit-user-drag:none; user-drag:none;" placeholder="加载中..."></textarea>
@@ -574,6 +593,10 @@
               <label class="form-label">火山引擎 API Key</label>
               <input type="password" class="form-control" id="model_volc_key" placeholder="xxx-xxx-xxx">
             </div>
+            <div class="col-12">
+              <label class="form-label">MiniMax API Key（文生图）</label>
+              <input type="password" class="form-control" id="model_minimax_key" placeholder="sk-xxx">
+            </div>
           </div>
         </div></div>
 
@@ -593,16 +616,20 @@
               <label class="form-label">思考强度</label>
               <div class="d-flex gap-2 mt-2">
                 <label class="model-radio">
+                  <input type="radio" name="model_effort" id="model_effort_off" value="off">
+                  <span>关闭</span>
+                </label>
+                <label class="model-radio">
                   <input type="radio" name="model_effort" id="model_effort_low" value="low">
-                  <span>low</span>
+                  <span>低</span>
                 </label>
                 <label class="model-radio">
                   <input type="radio" name="model_effort" id="model_effort_medium" value="medium">
-                  <span>medium</span>
+                  <span>中</span>
                 </label>
                 <label class="model-radio">
                   <input type="radio" name="model_effort" id="model_effort_high" value="high">
-                  <span>high</span>
+                  <span>高</span>
                 </label>
               </div>
             </div>
@@ -610,55 +637,23 @@
               <label class="form-label">最大上下文轮数</label>
               <input type="number" class="form-control" id="model_context" placeholder="8" min="1" max="50">
             </div>
+            <div class="col-md-6">
+              <label class="form-label">文生图模型</label>
+              <input type="text" class="form-control" id="model_minimax_img_model" placeholder="image-01">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">默认图片比例</label>
+              <select class="form-control" id="model_minimax_img_ratio">
+                <option value="1:1">1:1（方形）</option>
+                <option value="16:9">16:9（横图）</option>
+                <option value="9:16">9:16（竖图）</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+              </select>
+            </div>
           </div>
         </div></div>
 
-        <!-- 功能开关 -->
-        <div class="card mb-4"><div class="card-body">
-          <h3 class="h5 mb-3" style="color:#60a5fa;">功能开关</h3>
-          <div class="row gy-3">
-            <div class="col-md-6">
-              <div class="d-flex align-items-center justify-content-between py-2">
-                <span>对话思考模式</span>
-                <label class="model-switch">
-                  <input type="checkbox" id="model_think_chat">
-                  <span class="model-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-            <div class="col-md-6">
-              <div class="d-flex align-items-center justify-content-between py-2">
-                <span>视觉思考模式</span>
-                <label class="model-switch">
-                  <input type="checkbox" id="model_think_vision">
-                  <span class="model-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-            <div class="col-md-6">
-              <div class="d-flex align-items-center justify-content-between py-2">
-                <span>视觉任务用对话模型</span>
-                <label class="model-switch">
-                  <input type="checkbox" id="model_chat_for_vision">
-                  <span class="model-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-            <div class="col-md-6">
-              <div class="d-flex align-items-center justify-content-between py-2">
-                <span>联网搜索</span>
-                <label class="model-switch">
-                  <input type="checkbox" id="model_websearch">
-                  <span class="model-switch-slider"></span>
-                </label>
-              </div>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label">搜索结果数量</label>
-              <input type="number" class="form-control" id="model_search_num" placeholder="3" min="1" max="10">
-            </div>
-          </div>
-        </div></div>
 
         <!-- 语音合成 TTS -->
         <div class="card mb-4"><div class="card-body">
@@ -685,6 +680,10 @@
                     <input type="radio" name="model_tts_engine" id="model_tts_edge" value="edge">
                     <span>Edge TTS</span>
                   </label>
+                  <label class="model-radio">
+                    <input type="radio" name="model_tts_engine" id="model_tts_minimax" value="minimax">
+                    <span>MiniMax</span>
+                  </label>
                 </div>
               </div>
             </div>
@@ -696,10 +695,208 @@
               <label class="form-label">Edge TTS 音色（备用）</label>
               <input type="text" class="form-control" id="model_edge_voice" placeholder="zh-CN-XiaoyiNeural">
             </div>
+            <div class="col-md-6">
+              <label class="form-label">MiniMax 语音模型</label>
+              <select class="form-control" id="model_minimax_tts_model">
+                <option value="speech-2.8-hd">speech-2.8-hd（最新HD，支持语气词）</option>
+                <option value="speech-2.8-turbo">speech-2.8-turbo（最新Turbo，速度快）</option>
+                <option value="speech-2.6-hd">speech-2.6-hd</option>
+                <option value="speech-2.6-turbo">speech-2.6-turbo</option>
+                <option value="speech-02-hd">speech-02-hd</option>
+                <option value="speech-02-turbo">speech-02-turbo</option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">MiniMax 音色 ID</label>
+              <input type="text" class="form-control" id="model_minimax_tts_voice" placeholder="Chinese (Mandarin)_Crisp_Girl">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">语速</label>
+              <input type="number" class="form-control" id="model_minimax_tts_speed" step="0.1" min="0.5" max="2" value="1">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">音量</label>
+              <input type="number" class="form-control" id="model_minimax_tts_vol" step="0.1" min="0" max="10" value="1">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">音调</label>
+              <input type="number" class="form-control" id="model_minimax_tts_pitch" step="1" min="-12" max="12" value="0">
+            </div>
           </div>
         </div></div>
 
       </div>
+
+      <!-- 功能设置页 -->
+      <div id="page-features" class="page-content" style="display:none;">
+        <div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+          <div>
+            <h1 class="h2 mb-1">功能设置</h1>
+            <p class="text-muted mb-0">机器人各功能开关与参数，保存后需点左下角"应用并重启"生效</p>
+          </div>
+          <button class="btn btn-gradient-primary" onclick="saveFeatures()">保存功能设置</button>
+        </div>
+
+        <!-- 对话行为 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h5 class="mb-2">对话行为</h5>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_websearch"><span class="pill-slider"></span></label>
+            <span class="feat-label">联网搜索（博查）</span>
+            <div class="feat-param"><label>结果数</label><input type="number" class="form-control" id="feat_search_num" min="1" max="20"></div>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_think_chat"><span class="pill-slider"></span></label>
+            <span class="feat-label">聊天思考模式</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_think_vision"><span class="pill-slider"></span></label>
+            <span class="feat-label">视觉思考模式</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_chat_for_vision"><span class="pill-slider"></span></label>
+            <span class="feat-label">视觉任务用对话模型（不单独跑视觉模型）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_memory"><span class="pill-slider"></span></label>
+            <span class="feat-label">永久记忆（人物画像/备忘）</span>
+            <div class="feat-param"><label>上下文轮数</label><input type="number" class="form-control" id="feat_memory_turns" min="1" max="30"></div>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_ambient"><span class="pill-slider"></span></label>
+            <span class="feat-label">群内旁观缓存（没@也能看到最近聊啥）</span>
+            <div class="feat-param"><label>缓存条数</label><input type="number" class="form-control" id="feat_ambient_max" min="1" max="50"></div>
+          </div>
+        </div></div>
+
+        <!-- 消息处理 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h5 class="mb-2">消息处理</h5>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_merge"><span class="pill-slider"></span></label>
+            <span class="feat-label">消息合并（多条合并一次回复）</span>
+            <div class="feat-param"><label>等待(秒)</label><input type="number" class="form-control" id="feat_merge_wait" min="5" max="120"></div>
+            <div class="feat-param"><label>最大条数</label><input type="number" class="form-control" id="feat_merge_max" min="2" max="30"></div>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_random_chat"><span class="pill-slider"></span></label>
+            <span class="feat-label">自由聊天/接话（不@也偶尔插话）</span>
+            <div class="feat-param"><label>概率(%)</label><input type="number" class="form-control" id="feat_chat_prob" min="0" max="100"></div>
+            <div class="feat-param"><label>延续条数</label><input type="number" class="form-control" id="feat_followup" min="0" max="10"></div>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_split"><span class="pill-slider"></span></label>
+            <span class="feat-label">分段回复（长回复拆成多条）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_send_delay"><span class="pill-slider"></span></label>
+            <span class="feat-label">发送延迟（模拟人打字）</span>
+          </div>
+        </div></div>
+
+        <!-- 多媒体 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h5 class="mb-2">多媒体</h5>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_video"><span class="pill-slider"></span></label>
+            <span class="feat-label">视频识别（发视频自动抽帧）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_voice"><span class="pill-slider"></span></label>
+            <span class="feat-label">语音转文字（ASR）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_emoji"><span class="pill-slider"></span></label>
+            <span class="feat-label">表情包发送</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_img_cmd"><span class="pill-slider"></span></label>
+            <span class="feat-label">命令生图（/生成图片）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_img_tool"><span class="pill-slider"></span></label>
+            <span class="feat-label">AI工具生图</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_download"><span class="pill-slider"></span></label>
+            <span class="feat-label">本子下载</span>
+          </div>
+        </div></div>
+
+        <!-- 群与其他 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h5 class="mb-2">群与其他</h5>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_group_mod"><span class="pill-slider"></span></label>
+            <span class="feat-label">群管理工具（禁言/踢人）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_voice_tool"><span class="pill-slider"></span></label>
+            <span class="feat-label">语音合成工具（发语音）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_notify"><span class="pill-slider"></span></label>
+            <span class="feat-label">上线通知（启动时发消息）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_welcome"><span class="pill-slider"></span></label>
+            <span class="feat-label">新成员入群欢迎</span>
+          </div>
+        </div></div>
+
+        <!-- AI主动消息 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h5 class="mb-2" style="color:#f59e0b;">AI主动消息（长时间没人搭理时主动找话题）</h5>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_proactive_enable"><span class="pill-slider"></span></label>
+            <span class="feat-label">启用主动消息（总开关）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_proactive_private"><span class="pill-slider"></span></label>
+            <span class="feat-label">允许私聊主动消息</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_proactive_qzone"><span class="pill-slider"></span></label>
+            <span class="feat-label">允许主动发QQ空间说说（朋友圈）</span>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >静默多久后进入消息模式（分钟）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_idle_min" min="1"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >进入后随机延迟上限（分钟）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_random_min" min="0"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >活跃保护期（分钟，有人说话不插话）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_protect_min" min="0"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >冷却基础时间（分钟）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_cd_base_min" min="0"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >冷却额外随机上限（分钟）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_cd_rand_min" min="0"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >死寂门槛（小时，超久没说话不发）</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_dead_hour" min="0"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >群连续几次没回就不再打扰</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_group_giveup" min="1" max="10"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label" >私聊连续几次没回就不再打扰</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_proactive_private_giveup" min="1" max="10"></div>
+          </div>
+          <div class="col-12 mt-2">
+            <small class="text-muted">逻辑：群/私聊都没人和AI对话达到"静默时间"→随机延迟后AI挑最可能有人回的目标主动找话题（先自己想话题，实在没有才联网搜）→冷却后再来；对方说话或正常对话会立刻重置。</small>
+          </div>
+        </div></div>
+      </div>
+
     </div>
   </div>
 
@@ -711,6 +908,19 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.placeholder = hasValue ? '已设置（留空=不修改；输入重置可清空）' : '未设置';
+  }
+
+  function _pi(id, dft) {
+    var el = document.getElementById(id);
+    if (!el) return dft;
+    var v = parseInt(el.value);
+    return isNaN(v) ? dft : v;
+  }
+  function _pf(id, dft) {
+    var el = document.getElementById(id);
+    if (!el) return dft;
+    var v = parseFloat(el.value);
+    return isNaN(v) ? dft : v;
   }
 
   // ================= 保存按钮通用反馈 =================
@@ -794,7 +1004,7 @@
 
     // 页面切换（上下滑动转场，根据方向改变动画）
     let _currentPage = 'dashboard';
-    const _pageOrder = ['dashboard', 'models', 'prompt', 'connection', 'download', 'features', 'whitelist', 'logs', 'webui'];
+    const _pageOrder = ['dashboard', 'models', 'features', 'prompt', 'connection', 'download', 'whitelist', 'logs', 'webui'];
     function switchPage(pageName) {
       if (_currentPage === pageName) return;
       const current = document.getElementById('page-' + _currentPage);
@@ -829,6 +1039,7 @@
         if (pageName === 'prompt') loadPrompt();
       if (pageName === 'connection') loadConnection();
       if (pageName === 'models') loadModel();
+      if (pageName === 'features') loadFeatures();
       }, 250);
     }
     document.querySelectorAll('.sidebar .nav-link[data-page]').forEach(link => {
@@ -845,6 +1056,7 @@
         const res = await fetch(API_BASE + '/api/config/prompt');
         const data = await res.json();
         document.getElementById('promptEditor').value = data.prompt || '';
+        document.getElementById('promptBotName').value = data.bot_name || 'DeepSeek';
       } catch (e) {
       showToast('加载提示词失败：' + e.message, 'error');
       }
@@ -974,22 +1186,25 @@
           setSecretHint('model_bocha_key', c.has_bocha_api_key);
           document.getElementById('model_volc_key').value = c.volc_api_key || '';
           setSecretHint('model_volc_key', c.has_volc_api_key);
+          document.getElementById('model_minimax_key').value = c.minimax_api_key || '';
+          setSecretHint('model_minimax_key', c.has_minimax_api_key);
+          document.getElementById('model_minimax_img_model').value = c.minimax_image_model || 'image-01';
+          document.getElementById('model_minimax_img_ratio').value = c.minimax_image_ratio || '1:1';
           document.getElementById('model_chat').value = c.deepseek_model || '';
           document.getElementById('model_vision').value = c.deepseek_vision_model || '';
           document.getElementById('model_context').value = c.max_context_len || 8;
-          document.getElementById('model_search_num').value = c.search_result_num || 3;
           document.getElementById('model_volc_voice').value = c.volc_voice || '';
           document.getElementById('model_edge_voice').value = c.tts_voice || '';
+          document.getElementById('model_minimax_tts_model').value = c.minimax_tts_model || 'speech-2.8-hd';
+          document.getElementById('model_minimax_tts_voice').value = c.minimax_tts_voice || '';
+          document.getElementById('model_minimax_tts_speed').value = c.minimax_tts_speed || 1;
+          document.getElementById('model_minimax_tts_vol').value = c.minimax_tts_vol || 1;
+          document.getElementById('model_minimax_tts_pitch').value = c.minimax_tts_pitch || 0;
           // 单选按钮
           const effort = c.reasoning_effort || 'high';
           document.getElementById('model_effort_' + effort).checked = true;
           const ttsEngine = c.tts_engine || 'volc';
           document.getElementById('model_tts_' + ttsEngine).checked = true;
-          // 开关
-          document.getElementById('model_think_chat').checked = !!c.enable_thinking_chat;
-          document.getElementById('model_think_vision').checked = !!c.enable_thinking_vision;
-          document.getElementById('model_chat_for_vision').checked = !!c.use_chat_model_for_vision;
-          document.getElementById('model_websearch').checked = !!c.enable_web_search;
           document.getElementById('model_tts_enable').checked = !!c.enable_tts;
         }
       } catch (e) {
@@ -1004,27 +1219,125 @@
         deepseek_api_key: document.getElementById('model_deepseek_key').value,
         bocha_api_key: document.getElementById('model_bocha_key').value,
         volc_api_key: document.getElementById('model_volc_key').value,
+        minimax_api_key: document.getElementById('model_minimax_key').value,
+        minimax_image_model: document.getElementById('model_minimax_img_model').value,
+        minimax_image_ratio: document.getElementById('model_minimax_img_ratio').value,
         deepseek_model: document.getElementById('model_chat').value,
         deepseek_vision_model: document.getElementById('model_vision').value,
         reasoning_effort: effortEl ? effortEl.value : 'high',
         max_context_len: parseInt(document.getElementById('model_context').value) || 8,
-        search_result_num: parseInt(document.getElementById('model_search_num').value) || 3,
-        enable_thinking_chat: document.getElementById('model_think_chat').checked,
-        enable_thinking_vision: document.getElementById('model_think_vision').checked,
-        use_chat_model_for_vision: document.getElementById('model_chat_for_vision').checked,
-        enable_web_search: document.getElementById('model_websearch').checked,
         enable_tts: document.getElementById('model_tts_enable').checked,
         tts_engine: ttsEngineEl ? ttsEngineEl.value : 'volc',
         volc_voice: document.getElementById('model_volc_voice').value,
         tts_voice: document.getElementById('model_edge_voice').value,
+        minimax_tts_model: document.getElementById('model_minimax_tts_model').value,
+        minimax_tts_voice: document.getElementById('model_minimax_tts_voice').value,
+        minimax_tts_speed: parseFloat(document.getElementById('model_minimax_tts_speed').value) || 1,
+        minimax_tts_vol: parseFloat(document.getElementById('model_minimax_tts_vol').value) || 1,
+        minimax_tts_pitch: parseInt(document.getElementById('model_minimax_tts_pitch').value) || 0,
       };
       await runSave(btn, API_BASE + '/api/config/model', data);
+    }
+
+    async function loadFeatures() {
+      try {
+        const res = await fetch(API_BASE + '/api/config/features');
+        const c = (await res.json()).config || {};
+        const sw = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        sw('feat_websearch', c.enable_web_search);
+        sw('feat_think_chat', c.enable_thinking_chat);
+        sw('feat_think_vision', c.enable_thinking_vision);
+        sw('feat_chat_for_vision', c.use_chat_model_for_vision);
+        sw('feat_memory', c.enable_memory);
+        sw('feat_ambient', c.enable_ambient_cache);
+        sw('feat_merge', c.enable_message_merge);
+        sw('feat_random_chat', c.enable_random_chat);
+        sw('feat_split', c.enable_split_reply);
+        sw('feat_send_delay', c.enable_send_delay);
+        sw('feat_video', c.enable_video);
+        sw('feat_voice', c.enable_voice);
+        sw('feat_emoji', c.enable_emoji);
+        sw('feat_img_cmd', c.enable_image_command);
+        sw('feat_img_tool', c.enable_image_tool);
+        sw('feat_download', c.enable_download);
+        sw('feat_group_mod', c.enable_group_moderation);
+        sw('feat_voice_tool', c.enable_voice_tool);
+        sw('feat_notify', c.enable_notify);
+        sw('feat_welcome', c.welcome_new_member);
+        const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        setv('feat_search_num', c.search_result_num ?? 8);
+        setv('feat_memory_turns', c.memory_context_turns ?? 8);
+        setv('feat_ambient_max', c.ambient_max_msgs ?? 10);
+        setv('feat_merge_wait', c.merge_wait_seconds ?? 20);
+        setv('feat_merge_max', c.merge_max_count ?? 10);
+        setv('feat_chat_prob', Math.round((c.chat_trigger_probability ?? 0.3) * 100));
+        setv('feat_followup', c.follow_up_trigger_count ?? 3);
+        // AI主动消息
+        sw('feat_proactive_enable', c.enable_proactive_msg);
+        sw('feat_proactive_private', c.enable_proactive_private);
+        sw('feat_proactive_qzone', c.enable_proactive_qzone);
+        setv('feat_proactive_idle_min', Math.round((c.proactive_idle_seconds ?? 3600) / 60));
+        setv('feat_proactive_random_min', Math.round((c.proactive_random_max ?? 3600) / 60));
+        setv('feat_proactive_protect_min', Math.round((c.proactive_active_protect ?? 300) / 60));
+        setv('feat_proactive_cd_base_min', Math.round((c.proactive_cooldown_base ?? 5400) / 60));
+        setv('feat_proactive_cd_rand_min', Math.round((c.proactive_cooldown_random ?? 5400) / 60));
+        setv('feat_proactive_dead_hour', Math.round((c.proactive_dead_seconds ?? 43200) / 3600));
+        setv('feat_proactive_group_giveup', c.proactive_group_giveup ?? 2);
+        setv('feat_proactive_private_giveup', c.proactive_private_giveup ?? 1);
+      } catch (e) { showToast('加载功能设置失败: ' + e.message, 'error'); }
+    }
+
+    async function saveFeatures() {
+      const btn = document.querySelector('#page-features button[onclick="saveFeatures()"]');
+      const data = {
+        enable_web_search: document.getElementById('feat_websearch').checked,
+        search_result_num: _pi('feat_search_num', 8),
+        enable_thinking_chat: document.getElementById('feat_think_chat').checked,
+        enable_thinking_vision: document.getElementById('feat_think_vision').checked,
+        use_chat_model_for_vision: document.getElementById('feat_chat_for_vision').checked,
+        enable_memory: document.getElementById('feat_memory').checked,
+        memory_context_turns: _pi('feat_memory_turns', 8),
+        enable_ambient_cache: document.getElementById('feat_ambient').checked,
+        ambient_max_msgs: _pi('feat_ambient_max', 10),
+        enable_message_merge: document.getElementById('feat_merge').checked,
+        merge_wait_seconds: _pi('feat_merge_wait', 20),
+        merge_max_count: _pi('feat_merge_max', 10),
+        enable_random_chat: document.getElementById('feat_random_chat').checked,
+        chat_trigger_probability: _pi('feat_chat_prob', 30) / 100,
+        follow_up_trigger_count: _pi('feat_followup', 3),
+        enable_split_reply: document.getElementById('feat_split').checked,
+        enable_send_delay: document.getElementById('feat_send_delay').checked,
+        enable_video: document.getElementById('feat_video').checked,
+        enable_voice: document.getElementById('feat_voice').checked,
+        enable_emoji: document.getElementById('feat_emoji').checked,
+        enable_image_command: document.getElementById('feat_img_cmd').checked,
+        enable_image_tool: document.getElementById('feat_img_tool').checked,
+        enable_download: document.getElementById('feat_download').checked,
+        enable_group_moderation: document.getElementById('feat_group_mod').checked,
+        enable_voice_tool: document.getElementById('feat_voice_tool').checked,
+        enable_notify: document.getElementById('feat_notify').checked,
+        welcome_new_member: document.getElementById('feat_welcome').checked,
+        // AI主动消息（分钟/小时→秒）
+        enable_proactive_msg: document.getElementById('feat_proactive_enable').checked,
+        enable_proactive_private: document.getElementById('feat_proactive_private').checked,
+        enable_proactive_qzone: document.getElementById('feat_proactive_qzone').checked,
+        proactive_idle_seconds: _pi('feat_proactive_idle_min', 60) * 60,
+        proactive_random_max: _pi('feat_proactive_random_min', 60) * 60,
+        proactive_cooldown_base: _pi('feat_proactive_cd_base_min', 90) * 60,
+        proactive_cooldown_random: _pi('feat_proactive_cd_rand_min', 90) * 60,
+        proactive_dead_seconds: _pi('feat_proactive_dead_hour', 12) * 3600,
+        proactive_active_protect: _pi('feat_proactive_protect_min', 5) * 60,
+        proactive_group_giveup: _pi('feat_proactive_group_giveup', 2),
+        proactive_private_giveup: _pi('feat_proactive_private_giveup', 1),
+      };
+      await runSave(btn, API_BASE + '/api/config/features', data);
     }
 
     async function savePrompt() {
       const btn = document.querySelector('#page-prompt button[onclick="savePrompt()"]');
       const prompt = document.getElementById('promptEditor').value;
-      await runSave(btn, API_BASE + '/api/config/prompt', {prompt: prompt});
+      const bot_name = document.getElementById('promptBotName').value;
+      await runSave(btn, API_BASE + '/api/config/prompt', {prompt: prompt, bot_name: bot_name});
     }
 
     let chartRange = 30;
@@ -1296,7 +1609,7 @@
         link.classList.add('active');
         const page = link.dataset.page;
         // 已实现的页面不提示；只有"后续版本实现"的页面才提示（原来这里对所有非仪表盘页面都弹，且因为 Farvist 未定义一直在报错）
-        const BUILT_PAGES = ['dashboard', 'models', 'prompt', 'connection'];
+        const BUILT_PAGES = ['dashboard', 'models', 'prompt', 'connection', 'features'];
         if (!BUILT_PAGES.includes(page)) {
           showToast(link.textContent.trim() + ' 页面即将上线', 'info');
         }
