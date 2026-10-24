@@ -13,7 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
     .dash { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-    .sidebar { position: sticky; top: 0; align-self: start; height: 100vh; padding: 1.25rem 1rem; display: flex; flex-direction: column; gap: .35rem; }
+    .sidebar { position: sticky; top: 0; align-self: start; height: 100vh; padding: 1.25rem 1rem; display: flex; flex-direction: column; gap: .35rem; overflow-y:auto; }
     .sidebar .nav-link { display: flex; align-items: center; gap: .65rem; }
     .sidebar .nav-link { transition: text-indent 0.2s ease, background 0.2s ease; }
     .sidebar .nav-link.active { text-indent: 6px; }
@@ -38,7 +38,15 @@
     .chart-container { width: 100%; height: 360px; }
     .demo-banner { position: sticky; top: 0; z-index: 100; padding: .5rem 1rem; background: linear-gradient(90deg, rgba(255,193,7,.15), rgba(255,152,0,.1)); border-bottom: 1px solid rgba(255,193,7,.3); text-align: center; font-size: .875rem; }
     .demo-banner .tag { display: inline-block; padding: .15rem .5rem; background: rgba(255,193,7,.2); border-radius: .4rem; margin-right: .5rem; font-weight: 600; }
-    @media (max-width: 820px) { .dash { grid-template-columns: 1fr; } .sidebar { display: none; } }
+    @media (max-width: 820px) {
+  .dash { grid-template-columns: 1fr; }
+  .sidebar { position: fixed; left:0; top:0; bottom:0; width:260px; z-index:1050; transform:translateX(-100%); transition:transform .25s ease; height:100vh; }
+  .sidebar.open { transform:translateX(0); }
+  #hamburger { display:flex !important; }
+  #sidebarOverlay { display:block; }
+}
+#hamburger { display:none; position:fixed; top:12px; left:12px; z-index:1060; background:rgba(20,20,30,.8); border:1px solid rgba(255,255,255,.15); color:#fff; width:42px; height:42px; border-radius:10px; align-items:center; justify-content:center; font-size:20px; cursor:pointer; }
+#sidebarOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:1040; }
     /* 去掉farvist按钮左侧装饰条 */
     .btn-gradient-primary::before, .btn-gradient-primary::after { display: none !important; }
     .btn-gradient-primary { border-left: none !important; box-shadow: none !important; }
@@ -390,7 +398,9 @@
 <body>
 
   <div class="dash">
-    <aside class="sidebar glass-strong">
+    <button id="hamburger" onclick="toggleSidebar()">☰</button>
+    <div id="sidebarOverlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar glass-strong" id="sidebarEl">
       <a class="navbar-brand mb-5" href="#" style="margin-left:2.75rem;margin-top:0.5rem;"><span class="text-gradient">LunaBot</span></a>
       <a class="nav-link active" href="#" data-page="dashboard" draggable="false" ondragstart="event.preventDefault();return false;">仪表盘</a>
       <a class="nav-link" href="#" data-page="models" draggable="false" ondragstart="event.preventDefault();return false;">模型管理</a>
@@ -471,7 +481,7 @@
           <input type="text" class="form-control" id="promptBotName" placeholder="名字" style="width:220px;">
         </div>
         <div class="card"><div class="card-body">
-          <textarea id="promptEditor" class="form-control" draggable="false" ondragstart="event.preventDefault(); event.stopPropagation(); return false;" ondrop="event.preventDefault(); return false;" style="width:100%; min-height:500px; font-family:Consolas, monospace; font-size:.9rem; line-height:1.6; resize:none; -webkit-user-drag:none; user-drag:none;" placeholder="加载中..."></textarea>
+          <textarea id="promptEditor" class="form-control" draggable="false" ondragstart="event.preventDefault(); event.stopPropagation(); return false;" ondrop="event.preventDefault(); return false;" style="width:100%; height:calc(100vh - 280px); font-family:Consolas, monospace; font-size:.9rem; line-height:1.6; resize:none; -webkit-user-drag:none; user-drag:none;" placeholder="加载中..."></textarea>
 <script>document.getElementById("promptEditor").addEventListener("dragstart", function(e){e.preventDefault();e.stopPropagation();return false;});document.getElementById("promptEditor").addEventListener("drop", function(e){e.preventDefault();return false;});</script>
         </div></div>
       </div>
@@ -897,6 +907,19 @@
         </div></div>
       </div>
 
+      <div id="page-logs" class="page-content" style="display:none;overflow:hidden;">
+        <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+          <div>
+            <h1 class="h2 mb-1">实时日志</h1>
+            <p class="text-muted mb-0">三容器合并时间线，每3秒自动刷新</p>
+          </div>
+          <label class="d-flex align-items-center gap-1" style="font-size:14px;color:#cdd6f4;cursor:pointer;">
+            <input type="checkbox" id="log_auto" checked style="width:16px;height:16px;"> 自动刷新
+          </label>
+        </div>
+        <pre id="log_view" style="background:#11111b;color:#cdd6f4;padding:14px;margin:0;max-height:calc(100vh - 160px);min-height:300px;overflow-y:auto;font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-word;font-family:Consolas,Monaco,monospace;border-radius:12px;border:1px solid #45475a;">加载中...</pre>
+      </div>
+
     </div>
   </div>
 
@@ -1005,7 +1028,15 @@
     // 页面切换（上下滑动转场，根据方向改变动画）
     let _currentPage = 'dashboard';
     const _pageOrder = ['dashboard', 'models', 'features', 'prompt', 'connection', 'download', 'whitelist', 'logs', 'webui'];
+    function toggleSidebar() {
+      var sb = document.getElementById('sidebarEl');
+      var ov = document.getElementById('sidebarOverlay');
+      sb.classList.toggle('open');
+      ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
+    }
     function switchPage(pageName) {
+      document.getElementById('sidebarEl').classList.remove('open');
+      document.getElementById('sidebarOverlay').style.display = 'none';
       if (_currentPage === pageName) return;
       const current = document.getElementById('page-' + _currentPage);
       const target = document.getElementById('page-' + pageName);
@@ -1040,6 +1071,7 @@
       if (pageName === 'connection') loadConnection();
       if (pageName === 'models') loadModel();
       if (pageName === 'features') loadFeatures();
+      if (pageName === 'logs') loadLogs();
       }, 250);
     }
     document.querySelectorAll('.sidebar .nav-link[data-page]').forEach(link => {
@@ -1609,7 +1641,7 @@
         link.classList.add('active');
         const page = link.dataset.page;
         // 已实现的页面不提示；只有"后续版本实现"的页面才提示（原来这里对所有非仪表盘页面都弹，且因为 Farvist 未定义一直在报错）
-        const BUILT_PAGES = ['dashboard', 'models', 'prompt', 'connection', 'features'];
+        const BUILT_PAGES = ['dashboard', 'models', 'prompt', 'connection', 'features', 'logs'];
         if (!BUILT_PAGES.includes(page)) {
           showToast(link.textContent.trim() + ' 页面即将上线', 'info');
         }
@@ -1622,6 +1654,45 @@
 
     window.addEventListener('resize', function() {
       if (balanceChart) balanceChart.resize();
+    });
+
+    // ===== 实时日志 =====
+    let _logTimer = null;
+    async function loadLogs() {
+      const view = document.getElementById('log_view');
+      try {
+        const res = await fetch('/api/logs?lines=150');
+        const j = await res.json();
+        if (j.logs) {
+          const tagText = {'qq-bot':'[bot] ', 'qq-controller':'[ctrl] ', 'qq-napcat':'[nap] '};
+          let rows = [];
+          for (const k of ['qq-bot','qq-controller','qq-napcat']) {
+            let raw = (j.logs[k]||'');
+            raw = raw.replace(/\x1b\[[0-9;]*m/g, '');
+            const lines = raw.split('\n').filter(l=>l.trim());
+            for (const l of lines) {
+              let ts = '';
+              let m = l.match(/(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})/);
+              if (m) ts = m[1];
+              else { m = l.match(/(\d{2}-\d{2} \d{2}:\d{2}:\d{2})/); if (m) ts = '2026-' + m[1]; }
+              rows.push({ts: ts, text: tagText[k] + l});
+            }
+          }
+          rows.sort((a,b)=> a.ts.localeCompare(b.ts));
+          view.textContent = rows.map(r=>r.text).join('\n');
+          view.scrollTop = view.scrollHeight;
+        }
+      } catch (e) {
+        view.textContent = '[加载失败] ' + e.message;
+      }
+      if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+      if (document.getElementById('log_auto').checked) {
+        _logTimer = setInterval(loadLogs, 3000);
+      }
+    }
+    document.getElementById('log_auto').addEventListener('change', function() {
+      if (this.checked) loadLogs();
+      else if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
     });
   </script>
 

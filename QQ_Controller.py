@@ -870,6 +870,59 @@ def _history_api_payload(days=30):
     return {"days": result_days, "balance_used": result_used}
 
 
+
+def _docker_logs(container, tail_lines=300):
+    """通过挂载的 /var/run/docker.sock 调 Docker API 拿容器日志。"""
+    import socket as _sock
+    s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect("/var/run/docker.sock")
+    req = ("GET /containers/%s/logs?stdout=1&stderr=1&tail=%d HTTP/1.1\r\n"
+           "Host: localhost\r\n"
+           "Connection: close\r\n\r\n" % (container, tail_lines))
+    s.sendall(req.encode())
+    chunks = []
+    import time
+    deadline = time.time() + 4  # 最多等4秒
+    while time.time() < deadline:
+        s.settimeout(max(0.1, deadline - time.time()))
+        try:
+            d = s.recv(65536)
+        except Exception:
+            break
+        if not d: break
+        chunks.append(d)
+    s.close()
+    raw = b"".join(chunks)
+    # 分离 HTTP header 和 body
+    if b"\r\n\r\n" in raw:
+        _, body = raw.split(b"\r\n\r\n", 1)
+    else:
+        body = raw
+    # 解 chunked encoding
+    chunks = []
+    i = 0
+    while i < len(body):
+        j = body.find(b"\r\n", i)
+        if j < 0: break
+        try:
+            cl = int(body[i:j].split(b";")[0].strip(), 16)
+        except ValueError:
+            break
+        if cl == 0: break
+        chunks.append(body[j+2:j+2+cl])
+        i = j + 2 + cl + 2
+    body = b"".join(chunks) if chunks else body
+    # Docker multiplexed stream: 8字节头(stream+pad+len)
+    out = []
+    i = 0
+    while i + 8 <= len(body):
+        ln = int.from_bytes(body[i+4:i+8], "big")
+        if i + 8 + ln > len(body): break
+        out.append(body[i+8:i+8+ln])
+        i += 8 + ln
+    return (b"".join(out)).decode("utf-8", errors="replace")
+
 def _dashboard_payload():
     stats = _read_stats()
     bal = _get_balance()
@@ -1529,6 +1582,27 @@ class _WebUIHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "config": _get_model_config()})
         elif path == "/api/config/features":
             self._json(200, {"ok": True, "config": _get_features_config()})
+        elif path == "/api/logs":
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                lines = int(qs.get("lines", ["150"])[0])
+                lines = max(10, min(lines, 500))
+                import concurrent.futures as _cf
+                result = {}
+                names = ("qq-bot", "qq-controller", "qq-napcat")
+                with _cf.ThreadPoolExecutor(max_workers=3) as ex:
+                    futs = {ex.submit(_docker_logs, n, lines): n for n in names}
+                    for f in _cf.as_completed(futs, timeout=8):
+                        n = futs[f]
+                        try:
+                            result[n] = f.result()
+                        except Exception as e:
+                            result[n] = "[读取失败] " + str(e)
+                for n in names:
+                    if n not in result: result[n] = "[超时]"
+                self._json(200, {"ok": True, "logs": result})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
         else:
             self._json(404, {"ok": False, "error": "not found"})
 
