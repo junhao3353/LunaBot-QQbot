@@ -288,6 +288,10 @@ _pro_used_topics = []              # 最近主动发过的话题摘要（防重�
 
 # ---- AI回复转语音（edge-tts，免费在线合成；true=所有AI回复都发成语音条，false=原文本逻辑） ----
 ENABLE_TTS = False             # 总开关（配置文件 enable_tts 覆盖）
+ENABLE_FILE_READ = True         # 文本文件读取开关（配置文件 enable_file_read 覆盖）
+FILE_READ_MAX_CHARS = 4000      # 单次读取文件最大字符数
+_file_cache = {}                    # 文本文件内容缓存：key=chat_id，value={"content","name","ts"}，过期即丢（走图片缓存同款逻辑）
+_FILE_CACHE_TTL = 60                # 文件内容缓存60秒（配置文件 file_read_ttl 覆盖），过期丢弃不注入（配置文件 file_read_max_chars 覆盖）
 TTS_VOICE = "zh-CN-XiaoyiNeural"  # 音色：晓伊女声（配置文件 tts_voice 覆盖）
 TTS_ENGINE = "edge"            # TTS引擎：edge=微软edge-tts（免费），volc=火山引擎（豆包音色）
 # 火山引擎TTS配置（TTS_ENGINE=volc时生效）
@@ -1734,6 +1738,90 @@ def message_to_cq_str(message) -> str:
             params = ",".join(f"{k}={v}" for k, v in data.items())
             parts.append(f"[CQ:{seg_type}" + (f",{params}" if params else "") + "]")
     return "".join(parts)
+
+
+# ===================== 文本文件读取：群/私聊发txt/md等文件 → 读内容注入上下文 =====================
+TEXT_FILE_EXTS = {'.txt', '.md', '.log', '.json', '.py', '.js', '.html', '.htm', '.css',
+                  '.xml', '.yaml', '.yml', '.csv', '.sql', '.ini', '.conf', '.sh', '.bat',
+                  '.toml', '.ini', '.cfg', '.env', '.srt', '.ass', '.vtt'}
+
+async def read_text_file_segments(message, chat_id=None, max_chars=None, ws=None):
+    """从 OneBot 消息段数组里找文本文件，下载读内容后写入缓存（key=chat_id，60秒过期即丢，走图片缓存同款逻辑）。
+    返回文件名标记串（如 '[文件: notes.md]'），没有文本文件返回 ''。"""
+    if not ENABLE_FILE_READ:
+        return ''
+    if max_chars is None:
+        max_chars = FILE_READ_MAX_CHARS
+    import aiohttp
+    if not isinstance(message, list):
+        return ''
+    fnames = []
+    for seg in message:
+        if not isinstance(seg, dict) or seg.get('type') != 'file':
+            continue
+        data = seg.get('data', {}) or {}
+        name = data.get('name', '') or data.get('file', '') or ''
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in TEXT_FILE_EXTS:
+            continue
+        url = data.get('url', '')
+        # 没有 url 但有 file_id：调 get_file API 换 URL
+        if not url and ws:
+            fid = data.get('file_id', '')
+            if not fid:
+                print(f"📄 文件 {name} 没有 url 也没有 file_id，跳过")
+                continue
+            try:
+                fdata = await api_call(ws, "get_file", {"file_id": fid}, timeout=10)
+                finfo = (fdata.get("data", {}) or {})
+                url = finfo.get("url") or finfo.get("file") or ""
+            except Exception as e:
+                print(f"⚠️ get_file {name} 失败: {e}")
+                continue
+        if not url:
+            continue
+        try:
+            raw = b''
+            if str(url).startswith("/app/") or os.path.isfile(str(url)):
+                # 容器内本地路径（NapCat共享卷挂载后直接可读），直接读文件
+                with open(str(url), 'rb') as f:
+                    raw = f.read()
+            elif str(url).startswith("http"):
+                # http URL：下载
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                        if r.status != 200:
+                            print(f"📄 下载 {name} HTTP {r.status}，跳过")
+                            continue
+                        raw = await r.read()
+            else:
+                print(f"📄 文件 {name} 的路径无法识别: {str(url)[:100]}，跳过")
+                continue
+            # 尝试 utf-8，失败用 gbk
+            try:
+                content = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                content = raw.decode('gbk', errors='replace')
+            if len(content) > max_chars:
+                content = content[:max_chars] + f'\n...(文件共{len(content)}字符，已截断)'
+            if chat_id:
+                _file_cache[chat_id] = {"content": content, "name": name, "ts": time.time()}
+            fnames.append(name)
+            print(f"📄 文件已缓存: {name} ({len(content)}字，{_FILE_CACHE_TTL}秒有效)")
+        except Exception as e:
+            print(f"⚠️ 读取文件 {name} 失败: {e}")
+    return ('[文件: ' + '、'.join(fnames) + ']') if fnames else ''
+
+
+def _file_take(chat_id):
+    """取出并清空该聊天最近的文件内容缓存（自动过滤过期，过期即丢）。返回注入字符串或''。"""
+    item = _file_cache.pop(chat_id, None)
+    if not item:
+        return ''
+    if time.time() - item["ts"] >= _FILE_CACHE_TTL:
+        print(f"📄 文件缓存已过期丢弃: {item.get('name','')}")
+        return ''
+    return f'[用户发了文件 {item["name"]}，内容如下]\n{item["content"]}'
 
 
 def extract_user_text(cq_msg: str, self_id: int, raw_msg: str = "") -> str:
@@ -3909,6 +3997,10 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     # 加上当前用户消息，前面带QQ号标识
     _now_str = _format_now()
     messages.append({"role": "user", "content": f"[{_now_str}][QQ号:{user_id}] {prompt}"})
+    # 文件内容缓存注入：60秒内有效，过期即丢（走图片缓存同款逻辑）
+    _file_inject = _file_take(obj_id if is_group else user_id)
+    if _file_inject:
+        messages.append({"role": "user", "content": _file_inject})
 
     # 定义搜索工具，让AI自己判断是否调用、调用几次、用什么关键词
     # 只有开启联网搜索时才下发搜索工具；记忆工具按 ENABLE_MEMORY 独立下发
@@ -4990,6 +5082,8 @@ async def main():
             print(f"🧠 永久记忆已开启：恢复{_restored}个会话的最近{MEMORY_CONTEXT_TURNS}轮上下文，AI可自主更新成员档案/备忘")
         else:
             print("🧠 永久记忆已关闭")
+        _fr = "开启，单次最多" + str(FILE_READ_MAX_CHARS) + "字" if ENABLE_FILE_READ else "关闭"
+        print(f"📄 文本文件读取：{_fr}")
         print(f"🧠 对话模型思考模式：{'开启(' + REASONING_EFFORT + ')' if ENABLE_THINKING_CHAT else '关闭'}")
         if USE_CHAT_MODEL_FOR_VISION:
             print(f"🧠 图片识别：使用语言模型 {DEEPSEEK_MODEL}（思考模式{'开启' if ENABLE_THINKING_CHAT else '关闭'}）")
@@ -5147,6 +5241,9 @@ async def main():
                 # 主动消息钩子：每条真人消息更新目标活跃时间（AI回不回都记），被排除目标因此恢复
                 if user_id != self_id:
                     _pro_mark_human(f"g{chat_id}" if is_group else f"p{chat_id}")
+
+                # 文本文件内容注入：检测txt/md等文件，读内容缓存（60秒过期即丢）
+                _file_note = await read_text_file_segments(message, chat_id=chat_id, ws=ws)
 
                 # ===== 汽水音乐VIP试听确认：用户回复"1"→发送挂起的试听音频文件（过期清理由后台任务负责） =====
                 _pend = _qishui_pending.get(chat_id)
@@ -5427,11 +5524,16 @@ async def main():
                             continue
                     # 提取去掉@后的纯文字
                     user_text = extract_user_text(cq_msg, self_id, raw_msg)
+                    if _file_note:
+                        # 历史里只留文件名标记，完整内容在 _file_cache 里 60 秒过期即丢
+                        user_text = (user_text + '\n' + _file_note).strip()
                 else:
                     # 私聊直接用原始消息
                     user_text = raw_msg.strip()
                     if not user_text:
                         user_text = extract_user_text(cq_msg, self_id)
+                    if _file_note:
+                        user_text = (user_text + '\n' + _file_note).strip()
                     # 私聊屏蔽纯[无文字]标签（napcat对空消息/纯图片返回的占位符），但"xxx[无文字]"这种含其他内容的不屏蔽
                     if not is_group and user_text.strip() in ("[无文字]", "无文字"):
                         continue
@@ -5662,6 +5764,7 @@ def _load_config_file():
     global ENABLE_EMOJI, EMOJI_DIR, EMOJI_MAP
     global ENABLE_VIDEO, ENABLE_VOICE
     global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT
+    global ENABLE_FILE_READ, FILE_READ_MAX_CHARS, _FILE_CACHE_TTL
     global ENABLE_TTS, TTS_ENGINE, TTS_VOICE, VOLC_API_KEY, VOLC_VOICE, MINIMAX_TTS_MODEL, MINIMAX_TTS_VOICE, MINIMAX_TTS_SPEED, MINIMAX_TTS_VOL, MINIMAX_TTS_PITCH, BOT_NAME
 
     # onebot_ws：环境变量优先（Docker compose 里用它指向 napcat:6700，yml里可保持127.0.0.1给本机用）
@@ -5791,6 +5894,9 @@ def _load_config_file():
     ENABLE_VOICE = b("enable_voice", ENABLE_VOICE)
     # AI回复转语音开关（edge-tts）+ 音色
     ENABLE_TTS = b("enable_tts", ENABLE_TTS)
+    ENABLE_FILE_READ = b("enable_file_read", ENABLE_FILE_READ)
+    FILE_READ_MAX_CHARS = i("file_read_max_chars", FILE_READ_MAX_CHARS)
+    _FILE_CACHE_TTL = i("file_read_ttl", _FILE_CACHE_TTL)
     _tts_voice = s("tts_voice", "")
     if _tts_voice:
         TTS_VOICE = _tts_voice
