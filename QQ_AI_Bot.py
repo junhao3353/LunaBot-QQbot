@@ -1188,6 +1188,16 @@ def _mem_restore_contexts():
 
 # ===================== AI主动消息（长时间没人搭理时，AI主动找话题） =====================
 # 目标key统一：群=g{群号}，私聊=p{QQ}（对话历史key是g_{群号}/p_{QQ}，注意下划线区别）
+def _pro_key_tid(key: str):
+    """把 g123/p456 解析成 123；qzone 等非目标键返回 None（避免 int('zone') 崩溃）"""
+    try:
+        if key and key[0] in ("g", "p") and key[1:].isdigit():
+            return int(key[1:])
+    except Exception:
+        pass
+    return None
+
+
 def _pro_human_ts(key: str) -> float:
     """某目标最后真人消息时间；没记录过则用进程启动时间兜底（启动后先观察，不立刻主动发）。"""
     return _pro_last_human.get(key) or _pro_start_ts
@@ -1197,7 +1207,9 @@ def _pro_mark_human(key: str):
     """真人消息钩子：更新目标活跃时间；若在排除名单则移出并清零没回计数。群/私聊每条真人消息都调。"""
     _pro_last_human[key] = time.time()
     is_private = key.startswith("p")
-    tid = int(key[1:])
+    tid = _pro_key_tid(key)
+    if tid is None:
+        return
     excluded = _pro_excluded_private if is_private else _pro_excluded_groups
     if tid in excluded:
         excluded.discard(tid)
@@ -1273,7 +1285,11 @@ def _pro_update_noreply():
     有人回→清零；没人回→计数+1，达到阈值进排除名单。每条发言只统计一次。"""
     for key, send_ts in list(_pro_last_send.items()):
         is_private = key.startswith("p")
-        tid = int(key[1:])
+        tid = _pro_key_tid(key)
+        if tid is None:
+            # qzone 这类不是人目标：没有"回没回"的概念，直接清掉记录
+            _pro_last_send.pop(key, None)
+            continue
         if _pro_last_human.get(key, 0) > send_ts:
             if _pro_noreply.get(key, 0):
                 _pro_noreply[key] = 0

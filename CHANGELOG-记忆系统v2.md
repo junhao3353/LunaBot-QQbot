@@ -178,3 +178,9 @@ WebUI：「功能设置 → 对话行为 → 日志打印完整思维链」。
 工具门控           7/7
 思考链开关        10/10
 ```
+
+---
+
+## 九、补丁（2026-10-27）
+
+- 修复主动消息 `int('zone')` 崩溃：`_pro_update_noreply` 把 `qzone`（说说记录）当成 g/p 目标解析，每次触发都抛 `invalid literal for int() with base 10: 'zone'`。新增 `_pro_key_tid()` 安全解析，qzone 记录直接清理不参与"没回计数"；`_pro_mark_human` 同步加固。
