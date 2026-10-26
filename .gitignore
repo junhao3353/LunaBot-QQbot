@@ -103,3 +103,6 @@ get_douyin_login_cookie.py
 # 本地快捷脚本（不进git）
 看bot日志.bat
 看控制器日志.bat
+# 一次性改源码的临时脚本
+_wake*.py
+_*.patch

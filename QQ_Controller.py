@@ -500,10 +500,15 @@ def _get_features_config():
         "search_result_num": cfg.get("search_result_num", 8),
         "enable_thinking_chat": cfg.get("enable_thinking_chat", True),
         "enable_thinking_vision": cfg.get("enable_thinking_vision", True),
+        "show_thinking_content": cfg.get("show_thinking_content", False),
         "use_chat_model_for_vision": cfg.get("use_chat_model_for_vision", True),
-        "enable_memory": cfg.get("enable_memory", True),
-        "memory_context_turns": cfg.get("memory_context_turns", 8),
         "enable_ambient_cache": cfg.get("enable_ambient_cache", True),
+        "memory_enabled": cfg.get("memory_enabled", True),
+        "memory_saver_mode": cfg.get("memory_saver_mode", False),
+        "memory_profile_max_chars": cfg.get("memory_profile_max_chars", 3000),
+        "memory_compress_threshold": cfg.get("memory_compress_threshold", 2000),
+        "memory_context_rounds": cfg.get("memory_context_rounds", 15),
+        "memory_compress_interval": cfg.get("memory_compress_interval", 300),
         "ambient_max_msgs": cfg.get("ambient_max_msgs", 10),
         # 消息处理
         "enable_message_merge": cfg.get("enable_message_merge", True),
@@ -599,10 +604,15 @@ def _save_features_config(data):
         if "search_result_num" in data: cfg["search_result_num"] = _clamp_int(data["search_result_num"], 1, 20, 8); changed = True
         if "enable_thinking_chat" in data: cfg["enable_thinking_chat"] = _b("enable_thinking_chat"); changed = True
         if "enable_thinking_vision" in data: cfg["enable_thinking_vision"] = _b("enable_thinking_vision"); changed = True
+        if "show_thinking_content" in data: cfg["show_thinking_content"] = _b("show_thinking_content"); changed = True
         if "use_chat_model_for_vision" in data: cfg["use_chat_model_for_vision"] = _b("use_chat_model_for_vision"); changed = True
-        if "enable_memory" in data: cfg["enable_memory"] = _b("enable_memory"); changed = True
-        if "memory_context_turns" in data: cfg["memory_context_turns"] = _clamp_int(data["memory_context_turns"], 1, 30, 8); changed = True
         if "enable_ambient_cache" in data: cfg["enable_ambient_cache"] = _b("enable_ambient_cache"); changed = True
+        if "memory_enabled" in data: cfg["memory_enabled"] = _b("memory_enabled"); changed = True
+        if "memory_saver_mode" in data: cfg["memory_saver_mode"] = _b("memory_saver_mode"); changed = True
+        if "memory_profile_max_chars" in data: cfg["memory_profile_max_chars"] = _clamp_int(data["memory_profile_max_chars"], 500, 10000, 3000); changed = True
+        if "memory_compress_threshold" in data: cfg["memory_compress_threshold"] = _clamp_int(data["memory_compress_threshold"], 200, 8000, 2000); changed = True
+        if "memory_context_rounds" in data: cfg["memory_context_rounds"] = _clamp_int(data["memory_context_rounds"], 1, 100, 15); changed = True
+        if "memory_compress_interval" in data: cfg["memory_compress_interval"] = _clamp_int(data["memory_compress_interval"], 60, 3600, 300); changed = True
         if "ambient_max_msgs" in data: cfg["ambient_max_msgs"] = _clamp_int(data["ambient_max_msgs"], 1, 50, 10); changed = True
         # 消息处理
         if "enable_message_merge" in data: cfg["enable_message_merge"] = _b("enable_message_merge"); changed = True
@@ -656,8 +666,18 @@ def _save_connection_config(data):
     """保存连接配置（只写白名单键；密钥留空=不改动；写盘原子且保留注释）"""
     def _mutate(cfg):
         changed = False
-        if "onebot_ws" in data: cfg["onebot_ws"] = str(data["onebot_ws"]); changed = True
-        if "napcat_container" in data: cfg["napcat_container"] = str(data["napcat_container"]); changed = True
+        if "onebot_ws" in data:
+            _ws = str(data["onebot_ws"]).strip()
+            if _ws and not _ws.startswith(("ws://", "wss://", "http://", "https://")):
+                raise ValueError(f"OneBot 地址格式不合法：{_ws[:60]}")
+            cfg["onebot_ws"] = _ws
+            changed = True
+        if "napcat_container" in data:
+            _v = str(data["napcat_container"]).strip()
+            if _v and not _valid_container_name(_v):
+                raise ValueError(f"NapCat 容器名不合法：{_v[:60]}")
+            cfg["napcat_container"] = _v
+            changed = True
         if "napcat_data_dir" in data: cfg["napcat_data_dir"] = str(data["napcat_data_dir"]); changed = True
         if "napcat_view_dir" in data: cfg["napcat_view_dir"] = str(data["napcat_view_dir"]); changed = True
         if "douyin_api_enabled" in data: cfg["enable_douyin_api"] = bool(data["douyin_api_enabled"]); changed = True
@@ -679,9 +699,17 @@ def _save_connection_config(data):
         if "controller_ws_port" in data:
             cfg["controller"]["ws_port"] = _clamp_int(data["controller_ws_port"], 1, 65535, 6701); changed = True
         if "controller_container_ai" in data:
-            cfg["controller"]["container_ai"] = str(data["controller_container_ai"]); changed = True
+            _v = str(data["controller_container_ai"]).strip()
+            if _v and not _valid_container_name(_v):
+                raise ValueError(f"AI 容器名不合法：{_v[:60]}")
+            cfg["controller"]["container_ai"] = _v
+            changed = True
         if "controller_container_napcat" in data:
-            cfg["controller"]["container_napcat"] = str(data["controller_container_napcat"]); changed = True
+            _v = str(data["controller_container_napcat"]).strip()
+            if _v and not _valid_container_name(_v):
+                raise ValueError(f"NapCat 容器名不合法：{_v[:60]}")
+            cfg["controller"]["container_napcat"] = _v
+            changed = True
         return changed
 
     return _edit_config(_mutate)
@@ -871,57 +899,86 @@ def _history_api_payload(days=30):
 
 
 
+_CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
+def _valid_container_name(name) -> bool:
+    """容器名白名单：Docker 容器名只允许字母数字和下划线/点/短横，且不能有换行（防请求行注入）"""
+    return bool(_CONTAINER_NAME_RE.fullmatch(str(name or "").strip()))
+
+
 def _docker_logs(container, tail_lines=300):
-    """通过挂载的 /var/run/docker.sock 调 Docker API 拿容器日志。"""
-    import socket as _sock
-    s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
-    s.settimeout(5)
-    s.connect("/var/run/docker.sock")
-    req = ("GET /containers/%s/logs?stdout=1&stderr=1&tail=%d HTTP/1.1\r\n"
-           "Host: localhost\r\n"
-           "Connection: close\r\n\r\n" % (container, tail_lines))
-    s.sendall(req.encode())
-    chunks = []
-    import time
-    deadline = time.time() + 4  # 最多等4秒
-    while time.time() < deadline:
-        s.settimeout(max(0.1, deadline - time.time()))
+    """拿容器日志。优先用 docker SDK（安全，不拼 HTTP 请求行）；SDK 不可用时退回原始 socket，但容器名先校验。"""
+    try:
+        tail_lines = max(1, min(int(tail_lines), 2000))
+    except Exception:
+        tail_lines = 300
+    if not _valid_container_name(container):
+        return "[非法容器名，已拒绝]"
+    # 首选 docker SDK
+    try:
+        c = get_docker_client().containers.get(container)
+        raw = c.logs(tail=tail_lines, stdout=True, stderr=True, timestamps=False)
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return str(raw)
+    except Exception as sdk_err:
+        # 退路：原始 socket（容器名已通过白名单校验，不含 CRLF）
+        import socket as _sock
+        s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        s.settimeout(5)
         try:
-            d = s.recv(65536)
-        except Exception:
-            break
-        if not d: break
-        chunks.append(d)
-    s.close()
-    raw = b"".join(chunks)
-    # 分离 HTTP header 和 body
-    if b"\r\n\r\n" in raw:
-        _, body = raw.split(b"\r\n\r\n", 1)
-    else:
-        body = raw
-    # 解 chunked encoding
-    chunks = []
-    i = 0
-    while i < len(body):
-        j = body.find(b"\r\n", i)
-        if j < 0: break
-        try:
-            cl = int(body[i:j].split(b";")[0].strip(), 16)
-        except ValueError:
-            break
-        if cl == 0: break
-        chunks.append(body[j+2:j+2+cl])
-        i = j + 2 + cl + 2
-    body = b"".join(chunks) if chunks else body
-    # Docker multiplexed stream: 8字节头(stream+pad+len)
-    out = []
-    i = 0
-    while i + 8 <= len(body):
-        ln = int.from_bytes(body[i+4:i+8], "big")
-        if i + 8 + ln > len(body): break
-        out.append(body[i+8:i+8+ln])
-        i += 8 + ln
-    return (b"".join(out)).decode("utf-8", errors="replace")
+            s.connect("/var/run/docker.sock")
+            req = ("GET /containers/%s/logs?stdout=1&stderr=1&tail=%d HTTP/1.1\r\n"
+                   "Host: localhost\r\n"
+                   "Connection: close\r\n\r\n" % (container, tail_lines))
+            s.sendall(req.encode())
+            chunks = []
+            deadline = time.time() + 4
+            while time.time() < deadline:
+                s.settimeout(max(0.1, deadline - time.time()))
+                try:
+                    d = s.recv(65536)
+                except Exception:
+                    break
+                if not d:
+                    break
+                chunks.append(d)
+        finally:
+            s.close()
+        raw = b"".join(chunks)
+        if b"\r\n\r\n" in raw:
+            _, body = raw.split(b"\r\n\r\n", 1)
+        else:
+            body = raw
+        # 解 chunked encoding
+        parts = []
+        i = 0
+        while i < len(body):
+            j = body.find(b"\r\n", i)
+            if j < 0:
+                break
+            try:
+                cl = int(body[i:j].split(b";")[0].strip(), 16)
+            except ValueError:
+                break
+            if cl == 0:
+                break
+            parts.append(body[j + 2:j + 2 + cl])
+            i = j + 2 + cl + 2
+        body = b"".join(parts) if parts else body
+        # Docker multiplexed stream: 8字节头(stream+pad+len)
+        out = []
+        i = 0
+        while i + 8 <= len(body):
+            ln = int.from_bytes(body[i + 4:i + 8], "big")
+            if i + 8 + ln > len(body):
+                break
+            out.append(body[i + 8:i + 8 + ln])
+            i += 8 + ln
+        text = (b"".join(out)).decode("utf-8", errors="replace")
+        return text if text else "[读取失败] " + str(sdk_err)
+
 
 def _dashboard_payload():
     stats = _read_stats()

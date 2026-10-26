@@ -45,7 +45,7 @@
   #hamburger { display:flex !important; }
   #sidebarOverlay { display:block; }
 }
-#hamburger { display:none; position:fixed; top:12px; left:12px; z-index:1060; background:rgba(20,20,30,.8); border:1px solid rgba(255,255,255,.15); color:#fff; width:42px; height:42px; border-radius:10px; align-items:center; justify-content:center; font-size:20px; cursor:pointer; }
+#hamburger { display:none; position:fixed; top:22%; right:12px; z-index:1060; background:rgba(20,20,30,.8); border:1px solid rgba(255,255,255,.15); color:#fff; width:42px; height:42px; border-radius:10px; align-items:center; justify-content:center; font-size:20px; cursor:pointer; }
 #sidebarOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:1040; }
     /* 去掉farvist按钮左侧装饰条 */
     .btn-gradient-primary::before, .btn-gradient-primary::after { display: none !important; }
@@ -764,13 +764,28 @@
             <span class="feat-label">视觉思考模式</span>
           </div>
           <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_show_think"><span class="pill-slider"></span></label>
+            <span class="feat-label">日志打印完整思维链（关=只打印字节数）</span>
+          </div>
+          <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_chat_for_vision"><span class="pill-slider"></span></label>
             <span class="feat-label">视觉任务用对话模型（不单独跑视觉模型）</span>
           </div>
           <div class="feat-row">
-            <label class="pill"><input type="checkbox" id="feat_memory"><span class="pill-slider"></span></label>
-            <span class="feat-label">永久记忆（人物画像/备忘）</span>
-            <div class="feat-param"><label>上下文轮数</label><input type="number" class="form-control" id="feat_memory_turns" min="1" max="30"></div>
+            <label class="pill"><input type="checkbox" id="feat_memory_on"><span class="pill-slider"></span></label>
+            <span class="feat-label">记忆系统（画像 + 临时记忆）</span>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_mem_saver"><span class="pill-slider"></span></label>
+            <span class="feat-label">省流模式（只带主要人物 + 搜索工具）</span>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label">每人画像上限</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_mem_max" min="500" max="10000"></div>
+            <span class="feat-label">压缩阈值</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_mem_threshold" min="200" max="8000"></div>
+            <span class="feat-label">上下文轮数</span>
+            <div class="feat-param"><input type="number" class="form-control" id="feat_mem_rounds" min="1" max="100"></div>
           </div>
           <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_ambient"><span class="pill-slider"></span></label>
@@ -1279,9 +1294,14 @@
         sw('feat_websearch', c.enable_web_search);
         sw('feat_think_chat', c.enable_thinking_chat);
         sw('feat_think_vision', c.enable_thinking_vision);
+        sw('feat_show_think', c.show_thinking_content);
         sw('feat_chat_for_vision', c.use_chat_model_for_vision);
-        sw('feat_memory', c.enable_memory);
         sw('feat_ambient', c.enable_ambient_cache);
+        sw('feat_memory_on', c.memory_enabled);
+        sw('feat_mem_saver', c.memory_saver_mode);
+        setv('feat_mem_max', c.memory_profile_max_chars ?? 3000);
+        setv('feat_mem_threshold', c.memory_compress_threshold ?? 2000);
+        setv('feat_mem_rounds', c.memory_context_rounds ?? 15);
         sw('feat_merge', c.enable_message_merge);
         sw('feat_random_chat', c.enable_random_chat);
         sw('feat_split', c.enable_split_reply);
@@ -1298,7 +1318,6 @@
         sw('feat_welcome', c.welcome_new_member);
         const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         setv('feat_search_num', c.search_result_num ?? 8);
-        setv('feat_memory_turns', c.memory_context_turns ?? 8);
         setv('feat_ambient_max', c.ambient_max_msgs ?? 10);
         setv('feat_merge_wait', c.merge_wait_seconds ?? 20);
         setv('feat_merge_max', c.merge_max_count ?? 10);
@@ -1326,10 +1345,14 @@
         search_result_num: _pi('feat_search_num', 8),
         enable_thinking_chat: document.getElementById('feat_think_chat').checked,
         enable_thinking_vision: document.getElementById('feat_think_vision').checked,
+        show_thinking_content: document.getElementById('feat_show_think').checked,
         use_chat_model_for_vision: document.getElementById('feat_chat_for_vision').checked,
-        enable_memory: document.getElementById('feat_memory').checked,
-        memory_context_turns: _pi('feat_memory_turns', 8),
         enable_ambient_cache: document.getElementById('feat_ambient').checked,
+        memory_enabled: document.getElementById('feat_memory_on').checked,
+        memory_saver_mode: document.getElementById('feat_mem_saver').checked,
+        memory_profile_max_chars: _pi('feat_mem_max', 3000),
+        memory_compress_threshold: _pi('feat_mem_threshold', 2000),
+        memory_context_rounds: _pi('feat_mem_rounds', 15),
         ambient_max_msgs: _pi('feat_ambient_max', 10),
         enable_message_merge: document.getElementById('feat_merge').checked,
         merge_wait_seconds: _pi('feat_merge_wait', 20),

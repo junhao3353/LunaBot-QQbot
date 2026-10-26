@@ -44,7 +44,7 @@ services:
       - QQ2_NAPCAT_VIEW_DIR=/app/data
       - QQ2_DOWNLOAD_ROOT=/data/downloads
       # 永久记忆存档文件（成员好感度/备忘/上下文，挂载到项目memory目录，重启重建都不丢，可手动编辑）
-      - QQ2_MEMORY_FILE=/app/memory/memory.json
+      - QQ2_MEMORY_DIR=/app/memory
       # AI表情包目录（宿主机"表情包"文件夹挂到容器/app/emoji，只读；文件名即表情描述）
       - QQ2_EMOJI_DIR=/app/emoji
       # 抖音解析服务（独立容器 douyin_tiktok_download_api；在 .env 里填地址与Key）

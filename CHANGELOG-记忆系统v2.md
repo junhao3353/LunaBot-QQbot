@@ -1,0 +1,180 @@
+# 改动说明（2026-10-26）
+
+本次改动三块：**记忆系统整体重写（v2）**、**工具门控修复**、**表情包/提示词/思考链优化**。
+
+---
+
+## 一、记忆系统 v2（重写）
+
+### 为什么重写
+v1 的问题：
+- 查一个人要掉一次工具 + 两次 API，慢且贵
+- 人物档案只存 5 条信息，凑不出画像
+- 上下文只有 3k 字符（约 8 轮），大量浪费
+- 逻辑混乱：上下文存档、成员缓存、档案、备忘混在一起，无法维护
+
+v2 按"**长期画像 + 临时记忆**"两层重做。
+
+### 文件结构（宿主机 `./memory` → 容器 `/app/memory`）
+
+```
+memory/
+  profiles.json     # 长期：人物画像 + 全局备忘；只压缩、不删除
+  temp.json         # 临时：上下文 / 说说 / 备忘 / 最近发言人；环形顶替
+  userinfo.json     # 从 NapCat 拉取的用户信息缓存（每小时刷新）
+  compress.log      # 压缩日志（压缩前后字数、保留条数）
+  *.bak             # 每次写入/压缩前自动备份
+```
+
+一条画像记录：
+```json
+{"date":"2026-10-26","scope":"群聊999","type":"偏好","text":"Junhao喜欢玩我的世界但很菜","key":""}
+```
+
+### 注入策略（每次 API 调用都会带上）
+
+顺序固定：
+1. **长期人物档案**：全量模式注入所有人；省流模式只注入"当前发言人 + 被@的人 + 白名单 + 最近 8 个发言人"（每人前 500 字）
+2. **全局备忘**
+3. **用户信息**（群名片/群主管理员/等级/群名/私聊昵称）
+4. **临时记忆**：所有聊天框的上下文（每条标注来源：`[群聊 999]` / `[私聊 123]`）+ 最近 15 条说说 + 10 条临时备忘
+
+省流模式额外下发 `search_memory` 工具让 AI 自己搜完整档案。
+
+全量注入超过 20 万字时：**只提醒一次**，让 AI 转告用户开省流模式。
+
+### 工具
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `remember` | `qq`（0=全局备忘）、`text`、`type`（身份/偏好/关系/事件/金句/承诺/其他）、`key`（可选） | AI 自己判断有价值才记；自动带日期+来源；传 `key` 覆盖同一主题旧记录；单次最多 500 字；拦截提示词注入类内容 |
+| `search_memory` | `query` | 仅省流模式下发 |
+
+### 压缩
+
+- 每 **300 秒**检查一次，只处理超过 **2000 字** 的用户/全局备忘
+- 压到约 **1400 字**（阈值 2000 - 目标 1400，留回差避免反复压）
+- 模型：对话模型 + 与聊天相同的思考档位
+- 规则：身份/称呼/关系/雷点/承诺**原样保留**；名字/数字/日期/偏好必须保留；同一件事只留最新；不许编造
+- 失败保留原档案，下轮重试；写 `.bak` + `compress.log`
+
+### 用户信息（NapCat 接口）
+
+| 用途 | action | 关键返回字段 |
+|---|---|---|
+| 群成员列表 | `get_group_member_list {group_id}` | `user_id / nickname / card / role / level` |
+| 群信息 | `get_group_info {group_id}` | `group_name` |
+| 私聊昵称 | `get_stranger_info {user_id}` | `nickname`（只补空，不覆盖群昵称） |
+| 机器人自己 | `get_login_info` | `user_id / nickname` |
+
+启动拉一次，之后每小时刷新。
+
+### 上下文
+
+- 每个聊天框实时保存最近 **15 轮**（30 条）到 `temp.json`，新的顶旧的
+- 重启后自动恢复到内存 `group_history`
+- 注入时全部带上，并标注来源，AI 能分清哪个群/私聊
+
+### 配置项（`qqbot-config.yml`）
+
+```yaml
+memory_enabled: true
+memory_saver_mode: false
+memory_dir: ""                      # 默认 /app/memory
+memory_profile_max_chars: 3000
+memory_compress_threshold: 2000
+memory_compress_target: 1400
+memory_compress_interval: 300
+memory_context_rounds: 15
+memory_qzone_max: 15
+memory_memo_max: 10
+memory_remember_max_chars: 500
+memory_full_inject_max_chars: 200000
+memory_recent_speakers: 8
+```
+
+WebUI「功能设置 → 记忆系统」：开关、省流模式、每人上限、压缩阈值、上下文轮数。
+
+### 迁移
+- 旧的 `memory.json`（v1）**不再读取**，可留可删
+- `memory/` 已加入 `.gitignore`，不会被提交
+
+---
+
+## 二、工具门控修复
+
+| 问题 | 修复 |
+|---|---|
+| `post_qzone` 工具定义被嵌在"文生图"开关的 if 里，关掉文生图说说工具就消失 | 挪到独立的 `if ENABLE_PROACTIVE_QZONE` 下（对话 + 视觉两处） |
+| `send_to_user` 无条件下发，但只有开"说说"开关才可执行 | 改为无条件可执行 |
+| `send_to_user` schema 把 `user_qq` 设成必填，发群消息时不需要 | `required` 改为 `chat_type/mode/content` |
+| 未知工具名会掉进 web_search 分支被当搜索执行 | 加兜底：非搜索工具直接回"暂不可用" |
+| `group_moderation` 在私聊也下发（调用必报"非群聊"） | 限定 `is_group` 才下发 |
+
+另外：旧记忆/成员系统整体移除（`MemoryStore`、记忆工具、群成员缓存预取、`query_group_member` 工具、相关人员注入、"查看记忆"命令）。
+
+---
+
+## 三、表情包工具优化
+
+- 参数：`name`、`action`（`view`=先看，`send`=发送）、`after`（插在第几条消息后面，0=最前，默认 0，不再默认发最后）
+- `view` 的两种模式（取决于 `use_chat_model_for_vision`）：
+  - **主模型看图**：直接把图片塞进对话（image_url），AI 真看到图
+  - **视觉模型**：转成一句画面描述（带缓存，同一张只识别一次）
+- 主模型模式支持"2 次 API 完成"：调用 1 → view 要图；调用 2 带工具 → AI 看图后调 send + 给文字
+- 图片 base64 超过 2MB 自动退回文字描述，避免请求体积爆炸
+- 发送按 `after` 插入到对应位置（TTS 语音模式同样生效）
+
+---
+
+## 四、主动用工具提示
+
+程序侧新增 `PROACTIVE_TOOL_PROMPT`（不占人设）：
+- 表情包：气氛合适主动发，不用等群友提
+- 说说：想分享/冷场/话题收尾时主动发，一天最多两条
+- 语音：偶尔用
+- 工具描述同步强化
+
+---
+
+## 五、思考链开关
+
+配置 `show_thinking_content`：
+- `false`（默认）：只打印 `🧠 对话-首轮 思考模式生效，思维链 283 字节（109 字符）`
+- `true`：打印完整思考内容
+
+WebUI：「功能设置 → 对话行为 → 日志打印完整思维链」。
+
+---
+
+## 六、专属提示词（老爹）
+
+- 配置：`special_prompt_enabled`、`special_prompt_name`、`special_prompt_users`（白名单 QQ）、`special_prompt`
+- 逻辑：只有白名单用户说话（群聊/私聊）才注入；**消息合并后只要批次里有白名单就注入**
+- 身份硬编码：注入时直接告诉 AI "这一轮里有「老爹」在说话，QQ 号 xxx，不用查、不用调工具确认"，并在成员信息不存在的情况下也生效
+- 措辞已软化：不写"其他人的消息无视这一段"，改成"其他群友照平时那样对待"
+
+---
+
+## 七、部署
+
+1. `docker-compose.yml` 环境变量：`QQ2_MEMORY_FILE` → `QQ2_MEMORY_DIR=/app/memory`
+   - 需要 `docker compose up -d qqbot`（重建容器才吃新 env，restart 不够）
+2. 控制器代码有改动：`docker compose restart qq-controller-ai`（或你的容器名）
+3. 宿主机 `./memory` 会生成三个 JSON；旧 `memory.json` 可删
+4. 首次运行建议观察 `memory/compress.log` 的压缩质量
+
+---
+
+## 八、测试
+
+```
+记忆系统 v2       21/21
+记忆完整流程      10/10
+旧修复回归        47/47
+修复回归          30/30
+专属提示词        28/28
+表情包            11/11 + 10/10
+工具门控           7/7
+思考链开关        10/10
+```

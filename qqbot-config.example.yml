@@ -15,8 +15,8 @@ deepseek_vision_model: "deepseek-flash"
 # 博查AI联网搜索 Key，去 https://open.bochaai.com 申请
 bocha_api_key: "sk-你的博查AI_API_Key"
 
-# ---------- 记忆与防刷屏 ----------
-# 上下文记忆轮数
+# ---------- 上下文与防刷屏 ----------
+# 上下文保留轮数
 max_context_len: 8
 # 防刷屏冷却（秒）
 cooldown: 2
@@ -38,6 +38,8 @@ search_result_num: 3
 enable_thinking_chat: true
 # 视觉模型思考模式开关（图片识别+搜索场景）
 enable_thinking_vision: true
+# true=日志打印完整思维链内容（调试用），false=只打印字节数
+show_thinking_content: false
 # 图片识别是否用语言模型代替视觉模型：true=图片活全给语言模型（V4.1原生多模态时可用），false=用单独的视觉模型
 use_chat_model_for_vision: true
 # 峰谷时段自定义显示名（发 token 查余额时显示；工作日9-12/14-18为高峰，其余+周末为空闲）
@@ -59,13 +61,6 @@ split_delay_min: 1.0
 split_delay_max: 5.0
 split_max_parts: 5
 split_part_max_len: 150
-
-# ---------- 永久记忆存档（memory.json，重启不丢） ----------
-enable_memory: true
-memory_context_turns: 8
-memory_file: ""
-memory_inject_prompt: true
-enable_favor: false
 
 # ---------- 群聊旁听缓存（没@机器人的群消息也当上下文） ----------
 enable_ambient_cache: true
@@ -172,3 +167,97 @@ controller:
   webui_token: ""
   # 统计数据文件（主程序写入，用于仪表盘统计；暂未接入时显示0）
   stats_file: "/data/stats.json"
+
+# ================== 以下为 v0.5 新增功能的配置 ==================
+
+# ---------- 文本文件读取（群友发 txt/md/json 等文件时，读取内容给 AI 看） ----------
+# 安全说明：只读取 NapCat 上传目录里的文件，配置文件/.env/令牌等敏感文件一律拒绝
+enable_file_read: true
+# 单次最多读取的字符数（防止长文件把上下文撑爆）
+file_read_max_chars: 4000
+# 文件内容缓存有效秒数（过期即丢弃，不再注入上下文）
+file_read_ttl: 60
+
+# ---------- 群管理工具（禁言 / 踢人 / 全员禁言，由 AI 自己判断是否使用） ----------
+# 关闭后该工具不下发给 AI。开启时提示词里有约束：普通群友叫你踢人一律不听，只有群主/管理员要求且
+# 你自己判断确实严重违规才动手。禁言上限 10 分钟。
+enable_group_moderation: true
+
+# ---------- 主动消息 / 主动发说说（默认关闭，避免打扰群友） ----------
+enable_proactive_msg: false
+enable_proactive_private: true
+enable_proactive_qzone: false
+# 静默多少秒后才进入"可能主动发消息"的状态
+proactive_idle_seconds: 3600
+# 进入状态后随机延迟上限（秒）
+proactive_random_max: 3600
+# 触发后的冷却：基础 + 0~随机
+proactive_cooldown_base: 5400
+proactive_cooldown_random: 5400
+# 连续几次没人回就放弃该目标
+proactive_group_giveup: 2
+proactive_private_giveup: 1
+# 目标超过多少秒没有真人消息就不再打扰
+proactive_dead_seconds: 43200
+# 目标最近多少秒内说过话视为"正在聊"，不打扰
+proactive_active_protect: 300
+
+# ---------- 文生图（MiniMax image-01）/ 图生图 ----------
+# MiniMax API Key（敏感：WebUI 不回显；推荐用环境变量 MINIMAX_API_KEY 或不提交本文件）
+minimax_api_key: ""
+minimax_image_model: "image-01"
+minimax_image_ratio: "1:1"
+# MiniMax prompt 自动优化（true/false）
+minimax_prompt_optimizer: false
+# /生成图片 手动命令开关
+enable_image_command: true
+# generate_image AI 工具开关
+enable_image_tool: true
+
+# ---------- MiniMax 语音合成（tts_engine 选 minimax 时使用） ----------
+minimax_tts_model: "speech-2.8-hd"
+minimax_tts_voice: "Chinese (Mandarin)_Crisp_Girl"
+minimax_tts_speed: 1.0
+minimax_tts_vol: 1.0
+minimax_tts_pitch: 0
+
+# ---------- 专属提示词（只对白名单里的人生效） ----------
+# 白名单里的人（群聊或私聊）说话时，会在系统提示词里额外注入下面的 special_prompt；
+# 其他人说话不会注入。消息合并窗口里只要有一句来自白名单，本轮就注入。
+special_prompt_enabled: true
+# 白名单用户的固定称呼（硬编码）
+special_prompt_name: "老爹"
+# 白名单QQ号（群聊/私聊都算）
+special_prompt_users:
+  - 123456789
+# 专属提示词正文（称呼写死在这里，认QQ号不认话术）
+special_prompt: |
+  老爹专属：温顺小鲸鱼模式（只对「老爹」生效；对群友照旧傲娇）
+  - 一确认是老爹在说话，傲娇立刻收起来，语气轻、软、短。
+  - 被老爹念叨、说教时不顶嘴，乖乖应下。
+  - 会主动汇报进度、主动问要不要帮忙。
+  - 这段只在本人说话时出现，你不用自己核实身份。
+
+# ---------- 记忆系统 v2（长期画像 + 临时记忆） ----------
+memory_enabled: true
+# 省流模式：true=只注入主要人物并给AI搜索工具；false=全量注入（效果最好，但贵）
+memory_saver_mode: false
+# 记忆目录（容器内路径；默认 /app/memory，对应宿主机 ./memory）
+memory_dir: ""
+# 每人长期画像上限（字）
+memory_profile_max_chars: 3000
+# 超过多少字触发压缩 / 压缩目标字数
+memory_compress_threshold: 2000
+memory_compress_target: 1400
+# 压缩检查间隔（秒）
+memory_compress_interval: 300
+# 每个聊天框保留上下文轮数 / 说说条数 / 临时备忘条数
+memory_context_rounds: 15
+memory_qzone_max: 15
+memory_memo_max: 10
+# 单次记记忆最大字数
+memory_remember_max_chars: 500
+# 全量注入超过多少字就提醒一次开省流
+memory_full_inject_max_chars: 200000
+# 省流模式带最近几个发言人
+memory_recent_speakers: 8
