@@ -1341,13 +1341,24 @@ def _pro_parse_json(raw: str):
 
 
 def _pro_append_history(target_type: str, target_id: int, message: str):
-    """把主动消息写进对应对话历史并持久化，对方回复时AI能看到自己刚说过什么。"""
-    mem_key = f"g_{target_id}" if target_type == "group" else f"p_{target_id}"
+    """把主动消息写进对应对话历史并持久化（内存 + temp.json），
+    对方回复时、以及重启之后 AI 都能看到自己刚说过什么。"""
+    is_group = target_type == "group"
+    mem_key = f"g_{target_id}" if is_group else f"p_{target_id}"
     his = group_history[mem_key]
-    his.append({"role": "assistant", "content": message})
-    while len(his) > MAX_CONTEXT_LEN * 2:
+    _msgs = [message] if isinstance(message, str) else list(message or [])
+    for _m in _msgs:
+        if str(_m).strip():
+            his.append({"role": "assistant", "content": str(_m)})
+    limit = (MEMORY_CONTEXT_ROUNDS * 2) if (MEMORY_ENABLED and _mem is not None) else (MAX_CONTEXT_LEN * 2)
+    while len(his) > limit:
         his.pop(0)
     group_history[mem_key] = his
+    if MEMORY_ENABLED and _mem is not None:
+        try:
+            _mem.save_context(target_id, is_group, his)
+        except Exception as e:
+            print(f"⚠️ 主动消息上下文写入记忆失败：{e}")
 
 
 async def _proactive_trigger(websocket):
@@ -1462,6 +1473,7 @@ async def _proactive_trigger(websocket):
                                {"content": message, "images": [], "ugc_right": 1}, timeout=15)
             if r.get("retcode") == 0:
                 print(f"📢 空间说说已发布：{message[:50]}")
+                _remember_qzone(message)
                 _pro_last_send["qzone"] = time.time()
                 _pro_used_topics.append(messages_to_send[0][:50])
                 if len(_pro_used_topics) > 20:
@@ -1514,7 +1526,7 @@ async def _proactive_trigger(websocket):
     _pro_used_topics.append(messages_to_send[0][:50])
     if len(_pro_used_topics) > 20:
         _pro_used_topics.pop(0)
-    _pro_append_history(target_type, target_id, messages_to_send[0])
+    _pro_append_history(target_type, target_id, messages_to_send)
     print(f"📢 主动消息已发送 -> {target_type} {target_id}：{messages_to_send[0][:50]}（共{len(messages_to_send)}条）")
 
 
@@ -4226,6 +4238,25 @@ def _qzone_save_history():
         print(f"⚠️ 保存说说历史失败: {e}")
 
 
+def _remember_qzone(content: str):
+    """说说发成功后统一记录：旧历史 + 临时记忆（主动消息和工具都走这里）"""
+    content = (content or "").strip()
+    if not content:
+        return
+    try:
+        _qzone_history.append({"ts": _format_now(), "content": content})
+        while len(_qzone_history) > QZONE_HISTORY_COUNT:
+            _qzone_history.pop(0)
+        _qzone_save_history()
+    except Exception as e:
+        print(f"⚠️ 说说历史记录失败：{e}")
+    if MEMORY_ENABLED and _mem is not None:
+        try:
+            _mem.append_qzone(content)
+        except Exception as e:
+            print(f"⚠️ 说说写入临时记忆失败：{e}")
+
+
 def _sync_post_qzone(content: str) -> bool:
     """同步发QQ空间说说（在call_deepseek工作线程里调用）。"""
     if _MAIN_LOOP is None or _WS_REF is None:
@@ -4238,16 +4269,7 @@ def _sync_post_qzone(content: str) -> bool:
         r = fut.result(timeout=20)
         ok = r.get("retcode") == 0
         if ok:
-            # 追加到历史，截断到N条
-            _qzone_history.append({"ts": _format_now(), "content": content})
-            while len(_qzone_history) > QZONE_HISTORY_COUNT:
-                _qzone_history.pop(0)
-            _qzone_save_history()
-            if MEMORY_ENABLED and _mem is not None:
-                try:
-                    _mem.append_qzone(content)
-                except Exception as _me:
-                    print(f"⚠️ 说说写入临时记忆失败：{_me}")
+            _remember_qzone(content)
             print(f"📢 说说已记录，历史共{len(_qzone_history)}条")
         return ok
     except Exception as e:

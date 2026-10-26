@@ -184,3 +184,7 @@ WebUI：「功能设置 → 对话行为 → 日志打印完整思维链」。
 ## 九、补丁（2026-10-27）
 
 - 修复主动消息 `int('zone')` 崩溃：`_pro_update_noreply` 把 `qzone`（说说记录）当成 g/p 目标解析，每次触发都抛 `invalid literal for int() with base 10: 'zone'`。新增 `_pro_key_tid()` 安全解析，qzone 记录直接清理不参与"没回计数"；`_pro_mark_human` 同步加固。
+
+- 补丁（2026-10-27 之二）：
+  - 主动消息（群/私聊）发送后现在会写入 `temp.json` 上下文（`_pro_append_history` → `_mem.save_context`），重启后不丢；多条主动消息全部入历史
+  - 主动发说说原来绕过 `_sync_post_qzone` 直发，没进记忆；新增 `_remember_qzone()` 统一记录（旧说说历史 + 临时记忆），主动说说和 `post_qzone` 工具都走它
