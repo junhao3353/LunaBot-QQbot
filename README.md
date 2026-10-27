@@ -114,6 +114,8 @@ docker compose up -d
 
 WebUI 默认 `http://localhost:6650`，首次启动在 NapCat WebUI 添加反向 WebSocket 地址 `ws://qq-controller:6701`。
 
+> 注意：控制器启动时会把 `webui-dashboard.html` 读进内存，**改完 WebUI 需要重启 controller 容器**（`docker compose restart qq-controller`）再刷新页面。
+
 ### 记忆系统相关
 
 - 宿主机 `./memory` 挂载到容器 `/app/memory`，存放：
