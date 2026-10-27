@@ -1297,6 +1297,7 @@
         const res = await fetch(API_BASE + '/api/config/features');
         const c = (await res.json()).config || {};
         const sw = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         sw('feat_websearch', c.enable_web_search);
         sw('feat_think_chat', c.enable_thinking_chat);
         sw('feat_think_vision', c.enable_thinking_vision);
@@ -1325,7 +1326,6 @@
         sw('feat_voice_tool', c.enable_voice_tool);
         sw('feat_notify', c.enable_notify);
         sw('feat_welcome', c.welcome_new_member);
-        const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         setv('feat_search_num', c.search_result_num ?? 8);
         setv('feat_ambient_max', c.ambient_max_msgs ?? 10);
         setv('feat_merge_wait', c.merge_wait_seconds ?? 20);
