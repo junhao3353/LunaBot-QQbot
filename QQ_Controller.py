@@ -509,6 +509,9 @@ def _get_features_config():
         "memory_compress_threshold": cfg.get("memory_compress_threshold", 2000),
         "memory_context_rounds": cfg.get("memory_context_rounds", 15),
         "memory_compress_interval": cfg.get("memory_compress_interval", 300),
+        "memory_bank_enabled": cfg.get("memory_bank_enabled", True),
+        "memory_bank_max_entries": cfg.get("memory_bank_max_entries", 20000),
+        "memory_search_topk": cfg.get("memory_search_topk", 8),
         "ambient_max_msgs": cfg.get("ambient_max_msgs", 10),
         # 消息处理
         "enable_message_merge": cfg.get("enable_message_merge", True),
@@ -613,6 +616,9 @@ def _save_features_config(data):
         if "memory_compress_threshold" in data: cfg["memory_compress_threshold"] = _clamp_int(data["memory_compress_threshold"], 200, 8000, 2000); changed = True
         if "memory_context_rounds" in data: cfg["memory_context_rounds"] = _clamp_int(data["memory_context_rounds"], 1, 100, 15); changed = True
         if "memory_compress_interval" in data: cfg["memory_compress_interval"] = _clamp_int(data["memory_compress_interval"], 60, 3600, 300); changed = True
+        if "memory_bank_enabled" in data: cfg["memory_bank_enabled"] = _b("memory_bank_enabled"); changed = True
+        if "memory_bank_max_entries" in data: cfg["memory_bank_max_entries"] = _clamp_int(data["memory_bank_max_entries"], 1000, 200000, 20000); changed = True
+        if "memory_search_topk" in data: cfg["memory_search_topk"] = _clamp_int(data["memory_search_topk"], 1, 20, 8); changed = True
         if "ambient_max_msgs" in data: cfg["ambient_max_msgs"] = _clamp_int(data["ambient_max_msgs"], 1, 50, 10); changed = True
         # 消息处理
         if "enable_message_merge" in data: cfg["enable_message_merge"] = _b("enable_message_merge"); changed = True

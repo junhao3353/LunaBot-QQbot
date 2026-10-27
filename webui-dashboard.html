@@ -772,6 +772,12 @@
             <span class="feat-label">视觉任务用对话模型（不单独跑视觉模型）</span>
           </div>
           <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_bank_on"><span class="pill-slider"></span></label>
+            <span class="feat-label">记忆库（原文归档 + 语义搜索）</span>
+            <div class="feat-param"><label>上限</label><input type="number" class="form-control" id="feat_bank_max" min="1000" max="200000"></div>
+            <div class="feat-param"><label>返回条数</label><input type="number" class="form-control" id="feat_bank_topk" min="1" max="20"></div>
+          </div>
+          <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_memory_on"><span class="pill-slider"></span></label>
             <span class="feat-label">记忆系统（画像 + 临时记忆）</span>
           </div>
@@ -1298,6 +1304,9 @@
         sw('feat_chat_for_vision', c.use_chat_model_for_vision);
         sw('feat_ambient', c.enable_ambient_cache);
         sw('feat_memory_on', c.memory_enabled);
+        sw('feat_bank_on', c.memory_bank_enabled);
+        setv('feat_bank_max', c.memory_bank_max_entries ?? 20000);
+        setv('feat_bank_topk', c.memory_search_topk ?? 8);
         sw('feat_mem_saver', c.memory_saver_mode);
         setv('feat_mem_max', c.memory_profile_max_chars ?? 3000);
         setv('feat_mem_threshold', c.memory_compress_threshold ?? 2000);
@@ -1349,6 +1358,9 @@
         use_chat_model_for_vision: document.getElementById('feat_chat_for_vision').checked,
         enable_ambient_cache: document.getElementById('feat_ambient').checked,
         memory_enabled: document.getElementById('feat_memory_on').checked,
+        memory_bank_enabled: document.getElementById('feat_bank_on').checked,
+        memory_bank_max_entries: _pi('feat_bank_max', 20000),
+        memory_search_topk: _pi('feat_bank_topk', 8),
         memory_saver_mode: document.getElementById('feat_mem_saver').checked,
         memory_profile_max_chars: _pi('feat_mem_max', 3000),
         memory_compress_threshold: _pi('feat_mem_threshold', 2000),

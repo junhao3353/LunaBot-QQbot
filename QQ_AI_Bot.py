@@ -361,6 +361,13 @@ REPLY_STYLE_PROMPT = """
 9. 【工具调用铁律】需要调用工具时必须用 function calling 格式调用，绝对禁止把工具名称、参数、JSON格式当普通文字发到群里。比如要生成图片就调用 generate_image 工具，要禁言就调用 group_moderation 工具，不要在回复文本里写 generate_image prompt=xxx 或 禁言 123 600 这种内容。工具执行完后你再用正常文字回复结果。
 """
 
+# 查记忆提示（程序侧）
+MEMORY_RECALL_HINT = """
+
+【查记忆】
+群友说到「上次/之前/以前/记得/我说过/那个」、问你不知道的旧事，或者你想接话但不确定当时的语境时，
+先调用 search_memory 查一下记忆库再回答。不确定要不要查？查一下不丢人，瞎编才丢人。"""
+
 # 工具主动使用提示（程序侧规则，不占人设；人设只写"你是谁"，这里写"什么时候用工具"）
 PROACTIVE_TOOL_PROMPT = """
 
@@ -860,6 +867,544 @@ class MemoryV2:
         return "\n".join(hits[:limit])
 
 
+# ===================== 记忆库（bank：原文归档 + 打分 + 向量检索） =====================
+MEMORY_BANK_ENABLED = True
+MEMORY_BANK_MAX_ENTRIES = 20000
+MEMORY_BANK_CLEANUP_AT = 18000
+MEMORY_BANK_MAX_DAYS = 180
+MEMORY_BANK_SCORE_BATCH = 20
+MEMORY_BANK_COLD_THRESHOLD = 5
+MEMORY_BANK_COLD_STRIKES = 3
+MEMORY_BANK_REVIEW_DAYS = 3
+MEMORY_SEARCH_TOPK = 8
+MEMORY_RECALL_K = 30
+EMBEDDING_API_KEY = ""
+EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+EMBEDDING_MODEL = "text-embedding-v4"
+EMBEDDING_DIM = 1024
+
+_BANK_TAGS = ("身份", "偏好", "关系", "事件", "情绪", "承诺", "物品", "地点", "其他")
+
+
+def _bank_date(ts=None):
+    return datetime.fromtimestamp(ts or time.time()).strftime("%Y-%m-%d %H:%M")
+
+
+class MemoryBank:
+    """原文记忆库：每条消息一行 JSONL + 定长向量二进制，支持打分/冷存/清理/向量检索。"""
+
+    def __init__(self, base_dir):
+        import numpy as _np
+        self.np = _np
+        self.dir = base_dir
+        os.makedirs(self.dir, exist_ok=True)
+        self.path = os.path.join(self.dir, "bank.jsonl")
+        self.emb_path = os.path.join(self.dir, "bank_emb.bin")
+        self.queue_path = os.path.join(self.dir, "bank_queue.jsonl")
+        self.meta_path = os.path.join(self.dir, "bank_meta.json")
+        self.meta = _mem_load_json(self.meta_path, {"next_id": 1, "last_review": 0})
+        self.entries = []
+        self.emb = None
+        self._load()
+
+    # ---------- 读写 ----------
+    def _load(self):
+        self.entries = []
+        if os.path.isfile(self.path):
+            with open(self.path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                        if isinstance(e, dict) and e.get("text"):
+                            self.entries.append(e)
+                    except Exception:
+                        continue
+        # 向量文件（定长）
+        self.emb = None
+        if os.path.isfile(self.emb_path) and self.entries:
+            try:
+                raw = self.np.fromfile(self.emb_path, dtype=self.np.float32)
+                n = len(raw) // EMBEDDING_DIM
+                if n:
+                    m = raw[:n * EMBEDDING_DIM].reshape(n, EMBEDDING_DIM)
+                    # 条目和向量数量对不齐时以少的为准
+                    if len(m) != len(self.entries):
+                        k = min(len(m), len(self.entries))
+                        self.entries = self.entries[-k:]
+                        m = m[-k:]
+                    self.emb = m
+            except Exception as e:
+                print(f"⚠️ 记忆库向量加载失败：{e}")
+        if self.entries:
+            print(f"🗃️ 记忆库已加载：{len(self.entries)}条" + (f"，向量 {self.emb.shape[0]}条" if self.emb is not None else "，无向量"))
+
+    def _save_meta(self):
+        _mem_atomic_write(self.meta_path, self.meta)
+
+    def _append_entry(self, e, vec):
+        import shutil as _sh
+        line = json.dumps(e, ensure_ascii=False) + "\n"
+        with _mem_lock:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                with open(self.emb_path, "ab") as f:
+                    self.np.asarray(vec, dtype=self.np.float32).tofile(f)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception as ex:
+                # 向量写失败则整条回退（保持文件对齐）
+                print(f"⚠️ 记忆库向量写入失败：{ex}")
+                try:
+                    with open(self.path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    if lines and lines[-1].strip() == line.strip():
+                        with open(self.path, "w", encoding="utf-8") as f:
+                            f.writelines(lines[:-1])
+                except Exception:
+                    pass
+                return False
+            self.entries.append(e)
+            v = self.np.asarray(vec, dtype=self.np.float32).reshape(1, -1)
+            self.emb = v if self.emb is None else self.np.vstack([self.emb, v])
+            self.meta["next_id"] = int(self.meta.get("next_id", 1)) + 1
+            self._save_meta()
+        return True
+
+    def _rewrite(self):
+        """清理/删除后重写文件（原子替换）"""
+        import shutil as _sh
+        with _mem_lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for e in self.entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            os.replace(tmp, self.path)
+            if self.emb is not None and len(self.emb):
+                tmp2 = self.emb_path + ".tmp"
+                self.emb.astype(self.np.float32).tofile(tmp2)
+                os.replace(tmp2, self.emb_path)
+            else:
+                try:
+                    os.remove(self.emb_path)
+                except Exception:
+                    pass
+
+    # ---------- 队列（待评分） ----------
+    def enqueue(self, chat, speaker, role, text, ts=None):
+        if not MEMORY_BANK_ENABLED:
+            return
+        text = (text or "").strip()
+        if not text:
+            return
+        ts = ts or time.time()
+        item = {"ts": ts, "date": _bank_date(ts), "chat": str(chat), "speaker": str(speaker),
+                "role": role, "text": text[:1000]}
+        try:
+            with _mem_lock:
+                with open(self.queue_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"⚠️ 记忆库队列写入失败：{e}")
+
+    def _take_queue(self, batch):
+        if not os.path.isfile(self.queue_path):
+            return [], []
+        with _mem_lock:
+            with open(self.queue_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            head, rest = lines[:batch], lines[batch:]
+            with open(self.queue_path, "w", encoding="utf-8") as f:
+                f.writelines(rest)
+        items = []
+        for l in head:
+            try:
+                items.append(json.loads(l))
+            except Exception:
+                pass
+        return items, head
+
+    def _requeue(self, items):
+        try:
+            with _mem_lock:
+                with open(self.queue_path, "a", encoding="utf-8") as f:
+                    for it in items:
+                        f.write(json.dumps(it, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"⚠️ 记忆库队列回写失败：{e}")
+
+    # ---------- 评分 / 入库 ----------
+    @staticmethod
+    def _score_prompt(items):
+        sys_p = ("你是记忆评分器。给下面每条聊天消息打分并抽取信息，只输出 JSON，不要解释。\n"
+                 "分数 0-10：8-10=身份/亲密关系/重要承诺/重要事件/强烈偏好/雷点；"
+                 "5-7=一般偏好、日常事件、计划、近况；1-4=闲聊、情绪词、无信息。\n"
+                 "tags 只能从这些里选：身份,偏好,关系,事件,情绪,承诺,物品,地点,其他。\n"
+                 "summary 用不超过40个字概括这条消息里值得记住的事实（没有事实就给空字符串）。\n"
+                 '输出格式：[{"i":1,"score":7,"tags":["偏好"],"summary":"喜欢吃火鸡面"}]')
+        lines = []
+        for n, it in enumerate(items, 1):
+            who = "我" if it.get("role") == "assistant" else ("群友" if it.get("chat", "").startswith("g_") else "对方")
+            lines.append(f'{n}. [{it.get("date")}][{it.get("chat")}][{who} {it.get("speaker")}] {it.get("text")[:300]}')
+        user = "评分下面这些消息：\n" + "\n".join(lines)
+        return [{"role": "system", "content": sys_p}, {"role": "user", "content": user}]
+
+    def _parse_scores(self, text, n):
+        out = [None] * n
+        try:
+            s = text.strip()
+            s = re.sub(r"^```(?:json)?|```$", "", s, flags=re.M).strip()
+            i, j = s.find("["), s.rfind("]")
+            arr = json.loads(s[i:j + 1]) if i >= 0 and j > i else []
+            for item in arr:
+                try:
+                    k = int(item.get("i")) - 1
+                    if 0 <= k < n:
+                        out[k] = {
+                            "score": max(0, min(10, int(item.get("score", 0)))),
+                            "tags": [t for t in (item.get("tags") or []) if t in _BANK_TAGS][:4],
+                            "summary": str(item.get("summary") or "")[:80],
+                        }
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"⚠️ 记忆评分解析失败：{e}")
+        return out
+
+    def _embed(self, texts):
+        """调 embedding API，返回归一化向量列表（失败返回 None）"""
+        if not EMBEDDING_API_KEY or not texts:
+            return None
+        headers = {"Authorization": f"Bearer {EMBEDDING_API_KEY}", "Content-Type": "application/json"}
+        vecs = []
+        for start in range(0, len(texts), 10):
+            batch = texts[start:start + 10]
+            payload = {"model": EMBEDDING_MODEL, "input": batch, "dimensions": EMBEDDING_DIM,
+                       "encoding_format": "float"}
+            res = _post_json(EMBEDDING_BASE_URL.rstrip("/") + "/embeddings", headers, payload, 30, "记忆库向量")
+            data = res.get("data") or []
+            if len(data) != len(batch):
+                raise RuntimeError(f"向量返回数量异常：{len(data)}/{len(batch)}")
+            data = sorted(data, key=lambda x: x.get("index", 0))
+            for d in data:
+                v = self.np.asarray(d.get("embedding") or [], dtype=self.np.float32)
+                n = float(self.np.linalg.norm(v)) or 1.0
+                vecs.append(v / n)
+        return vecs
+
+    def process_batch(self, batch_size=None):
+        """取队列一批：打分 → 抽摘要 → 向量 → 入库"""
+        batch_size = batch_size or MEMORY_BANK_SCORE_BATCH
+        items, _raw = self._take_queue(batch_size)
+        if not items:
+            return 0
+        try:
+            total = max(1, len(items))
+            payload = _bank_call_model(_score_batch_messages(items))
+            scores = self._parse_scores(payload, len(items))
+            texts = []
+            for it, sc in zip(items, scores):
+                if not sc:
+                    sc = {"score": 2, "tags": [], "summary": ""}
+                it["_score"] = sc["score"]
+                it["_tags"] = sc["tags"]
+                it["_summary"] = sc["summary"]
+                texts.append((sc["summary"] or it.get("text") or "")[:200])
+            vecs = self._embed(texts)
+            if vecs is None:
+                # 没配 key/失败：先把条目回队列，等下次
+                self._requeue(items)
+                print("⚠️ 记忆库暂不可用（embedding 未配置或失败），本批已回队列")
+                return 0
+            added = 0
+            for it, sc, vec in zip(items, scores, vecs):
+                e = {
+                    "id": int(self.meta.get("next_id", 1)),
+                    "ts": it.get("ts") or time.time(),
+                    "date": it.get("date") or _bank_date(it.get("ts")),
+                    "chat": it.get("chat", ""),
+                    "speaker": it.get("speaker", ""),
+                    "role": it.get("role", "user"),
+                    "text": it.get("text", ""),
+                    "score": sc["score"],
+                    "tags": sc["tags"],
+                    "summary": sc["summary"],
+                    "cold": False,
+                    "strikes": 0,
+                }
+                if self._append_entry(e, vec):
+                    added += 1
+            if added:
+                print(f"🗃️ 记忆库入库 {added} 条（{self.entries[-1].get('date')}，现有 {len(self.entries)} 条）")
+            self._maybe_cleanup()
+            return added
+        except Exception as e:
+            import traceback as _tb
+            _err = _tb.format_exc()[-800:]
+            print(f"⚠️ 记忆库批处理失败：{e}\n{_err}")
+            self._requeue(items)
+            return 0
+
+    # ---------- 清理 ----------
+    def _maybe_cleanup(self):
+        n = len(self.entries)
+        if n < MEMORY_BANK_CLEANUP_AT:
+            return
+        target = int(MEMORY_BANK_MAX_ENTRIES * 0.75)
+        keep = []
+        order = sorted(range(n), key=lambda i: (
+            0 if self.entries[i].get("cold") else 1,
+            int(self.entries[i].get("score", 0)),
+            -float(self.entries[i].get("ts", 0)),
+        ))
+        remove = set(order[:max(0, n - target)])
+        # 超期且分低的优先
+        now = time.time()
+        for i, e in enumerate(self.entries):
+            if i in remove:
+                continue
+            if now - float(e.get("ts", now)) > MEMORY_BANK_MAX_DAYS * 86400 and int(e.get("score", 0)) < 7:
+                remove.add(i)
+        keep = [e for i, e in enumerate(self.entries) if i not in remove]
+        kept_idx = [i for i in range(n) if i not in remove]
+        old_emb = self.emb
+        with _mem_lock:
+            self.entries = keep
+            if old_emb is not None and len(kept_idx):
+                self.emb = old_emb[kept_idx]
+            else:
+                self.emb = None
+            self._rewrite()
+        print(f"🧹 记忆库清理：{n} → {len(self.entries)} 条")
+
+    # ---------- 冷存评估 ----------
+    def review_cold(self):
+        now = time.time()
+        if now - float(self.meta.get("last_review", 0)) < MEMORY_BANK_REVIEW_DAYS * 86400:
+            return
+        cand = [e for e in self.entries
+                if int(e.get("score", 0)) < MEMORY_BANK_COLD_THRESHOLD and not e.get("cold")]
+        self.meta["last_review"] = now
+        self._save_meta()
+        if not cand:
+            return
+        for start in range(0, len(cand), MEMORY_BANK_SCORE_BATCH):
+            batch = cand[start:start + MEMORY_BANK_SCORE_BATCH]
+            try:
+                msgs = [{"role": "system", "content": (
+                    "你是记忆清理器。判断下面每条旧记忆现在还有没有保留价值，只输出 JSON。\n"
+                    '价值：keep=还有用；cold=大概率没用了（但不删）；delete=明显废话可以删。\n'
+                    '输出格式：[{"i":1,"action":"keep"}]')},
+                    {"role": "user", "content": "\n".join(
+                        f'{n}. [{e.get("date")}][{e.get("chat")}] {e.get("text")[:200]}'
+                        for n, e in enumerate(batch, 1))}]
+                out = _bank_call_model(msgs, 600)
+                s = re.sub(r"^```(?:json)?|```$", "", out.strip(), flags=re.M).strip()
+                i, j = s.find("["), s.rfind("]")
+                arr = json.loads(s[i:j + 1]) if i >= 0 and j > i else []
+                actions = {}
+                for a in arr:
+                    try:
+                        actions[int(a.get("i")) - 1] = str(a.get("action", "keep"))
+                    except Exception:
+                        continue
+                del_ids = set()
+                for k, e in enumerate(batch):
+                    act = actions.get(k, "keep")
+                    if act == "keep":
+                        continue
+                    e["cold"] = True
+                    e["strikes"] = int(e.get("strikes", 0)) + 1
+                    if act == "delete" or e["strikes"] >= MEMORY_BANK_COLD_STRIKES:
+                        del_ids.add(e.get("id"))
+                if del_ids:
+                    keep_idx = [i for i, x in enumerate(self.entries) if x.get("id") not in del_ids]
+                    with _mem_lock:
+                        self.entries = [self.entries[i] for i in keep_idx]
+                        self.emb = self.emb[keep_idx] if self.emb is not None else None
+                        self._rewrite()
+                    print(f"🧊 冷存评估：删除 {len(del_ids)} 条")
+                else:
+                    with _mem_lock:
+                        self._rewrite()
+                print(f"🧊 冷存评估：本批 {len(batch)} 条，冷存 {sum(1 for e in batch if e.get('cold'))} 条")
+            except Exception as e:
+                print(f"⚠️ 冷存评估失败：{e}")
+        self._save_meta()
+
+    # ---------- 检索 ----------
+    def search(self, query, k=None, date_from=None, date_to=None, chat=None):
+        if not self.entries:
+            return "记忆库里还没有内容。"
+        if self.emb is None or len(self.emb) == 0:
+            return "记忆库向量还没建好（等后台入库后再试）。"
+        k = max(1, min(int(k or MEMORY_SEARCH_TOPK), 20))
+        try:
+            qv = self._embed([query or ""])
+            if not qv:
+                return "记忆检索失败（embedding 不可用）。"
+            q = qv[0]
+        except Exception as e:
+            return f"记忆检索失败：{e}"
+        sims = (self.emb @ q).astype(self.np.float32)
+        recall = max(k * 4, MEMORY_RECALL_K)
+        idx = list(self.np.argsort(-sims)[:recall])
+        now = time.time()
+        ranked = []
+        for i in idx:
+            e = self.entries[i] if i < len(self.entries) else None
+            if not e or e.get("cold"):
+                continue
+            if chat:
+                _c = str(chat).strip()
+                _k = str(e.get("chat"))
+                if _c and _c not in _k and _k not in _c:
+                    continue
+            ts = float(e.get("ts", 0))
+            if date_from and ts < date_from:
+                continue
+            if date_to and ts > date_to:
+                continue
+            recency = max(0.0, 1.0 - (now - ts) / (30 * 86400))
+            tag_bonus = 0.1 if (e.get("tags") and any(t in (query or "") for t in e["tags"])) else 0.0
+            final = 0.55 * float(sims[i]) + 0.2 * (int(e.get("score", 0)) / 10.0) + 0.15 * recency + tag_bonus
+            ranked.append((final, e))
+        ranked.sort(key=lambda x: -x[0])
+        if not ranked:
+            return f"没有搜到和「{query}」相关的记忆。"
+        out = []
+        for final, e in ranked[:k]:
+            out.append(self._format_hit(e))
+        return "\n\n".join(out)
+
+    def _format_hit(self, e):
+        """命中条目 + 同聊天前后各一条 + 当时的回复"""
+        head = f'[{e.get("date")}][{e.get("chat")}][{e.get("score")}分]'
+        tags = f'[{",".join(e.get("tags") or [])}]' if e.get("tags") else ""
+        who = "我" if e.get("role") == "assistant" else "对方"
+        lines = [f'{head}{tags} {who}：{e.get("text")}']
+        ts = float(e.get("ts", 0))
+        same = [x for x in self.entries if str(x.get("chat")) == str(e.get("chat"))]
+        same.sort(key=lambda x: float(x.get("ts", 0)))
+        try:
+            pos = next(i for i, x in enumerate(same) if x.get("id") == e.get("id"))
+        except StopIteration:
+            return "\n".join(lines)
+        if pos - 1 >= 0:
+            p = same[pos - 1]
+            lines.append(f'  前一条 [{p.get("date")}] {"我" if p.get("role") == "assistant" else "对方"}：{p.get("text")[:200]}')
+        if pos + 1 < len(same):
+            n = same[pos + 1]
+            lines.append(f'  后一条 [{n.get("date")}] {"我" if n.get("role") == "assistant" else "对方"}：{n.get("text")[:200]}')
+        return "\n".join(lines)
+
+
+def _bank_call_model(messages, max_tokens=900):
+    """记忆库专用便宜调用：关思考、低温度、限制输出长度"""
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    data = _build_chat_data(DEEPSEEK_MODEL, messages, False)
+    data["temperature"] = 0.1
+    data["max_tokens"] = max_tokens
+    res = _post_json("https://api.deepseek.com/v1/chat/completions", headers, data, 60, "记忆库")
+    choices = res.get("choices") or []
+    if not choices:
+        raise RuntimeError(res.get("error") or "无返回")
+    return (choices[0]["message"].get("content") or "").strip()
+
+
+def _score_batch_messages(items):
+    return MemoryBank._score_prompt(items)
+
+
+_bank = None
+
+
+def _bank_init(base_dir):
+    global _bank
+    try:
+        _bank = MemoryBank(base_dir)
+    except Exception as e:
+        print(f"⚠️ 记忆库初始化失败：{e}")
+        _bank = None
+    # 首次启动且记忆库为空：把 temp.json 里现有的上下文导入队列，不用等新消息
+    try:
+        if (_bank is not None and not _bank.entries and _mem is not None
+                and not _bank.meta.get("bootstrapped")):
+            _n = 0
+            for _key, _msgs in (_mem.temp.get("contexts") or {}).items():
+                for _m in (_msgs or []):
+                    _t = (_m.get("content") or "").strip()
+                    if not _t:
+                        continue
+                    _bank.enqueue(_key, "unknown", _m.get("role", "user"), _t)
+                    _n += 1
+            _bank.meta["bootstrapped"] = True
+            _bank._save_meta()
+            if _n:
+                print(f"🗃️ 记忆库首次导入：{_n} 条历史上下文已入队")
+    except Exception as e:
+        print(f"⚠️ 记忆库历史导入失败：{e}")
+    return _bank
+
+
+def _bank_tool_defs():
+    if not MEMORY_BANK_ENABLED or _bank is None:
+        return []
+    return [{
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": ("搜索记忆库：按语义找以前聊过的事/说过的话（原文片段+前后文）。"
+                            "当群友提到「上次/之前/以前/记得/我说过/那个」、问你不确定的旧事、"
+                            "或你想接话但不确定当时语境时，先调用它查一下再回。"
+                            "query 用一句人话描述要找什么（比如「用户吃了什么」「上次说的面」），不用拼关键词。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "要回忆什么，一句话描述即可"},
+                    "k": {"type": "integer", "description": "返回几条，默认8，最多20"},
+                    "chat": {"type": "string", "description": "可选，限定聊天（群号/私聊QQ，或 g_群号/p_QQ）"},
+                },
+                "required": ["query"]
+            }
+        }
+    }]
+
+
+def _bank_handle_tool(tool_name, args):
+    if tool_name != "search_memory" or _bank is None:
+        return "记忆库未启用。"
+    return _bank.search(str(args.get("query", "") or ""), args.get("k"),
+                        chat=args.get("chat") or None)
+
+
+async def _bank_worker_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            if MEMORY_BANK_ENABLED and _bank is not None:
+                await asyncio.to_thread(_bank.process_batch)
+        except Exception as e:
+            print(f"⚠️ 记忆库入库循环异常：{e}")
+        await asyncio.sleep(20)
+
+
+async def _bank_review_loop():
+    await asyncio.sleep(600)
+    while True:
+        try:
+            if MEMORY_BANK_ENABLED and _bank is not None:
+                await asyncio.to_thread(_bank.review_cold)
+        except Exception as e:
+            print(f"⚠️ 记忆库冷存评估异常：{e}")
+        await asyncio.sleep(6 * 3600)
+
+
 # ---------- 初始化 / 注入 ----------
 def _mem_init(base_dir):
     global _mem
@@ -944,19 +1489,6 @@ def _memory_tool_defs_v2():
             }
         }
     }]
-    if MEMORY_SAVER_MODE:
-        defs.append({
-            "type": "function",
-            "function": {
-                "name": "search_memory",
-                "description": "搜索记忆：按关键词/QQ号/昵称查人物档案和全局备忘（省流模式下完整档案要用它查）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string", "description": "关键词、QQ号或昵称"}},
-                    "required": ["query"]
-                }
-            }
-        })
     return defs
 
 
@@ -1359,6 +1891,14 @@ def _pro_append_history(target_type: str, target_id: int, message: str):
             _mem.save_context(target_id, is_group, his)
         except Exception as e:
             print(f"⚠️ 主动消息上下文写入记忆失败：{e}")
+    if MEMORY_BANK_ENABLED and _bank is not None:
+        try:
+            _ck2 = f"g_{target_id}" if is_group else f"p_{target_id}"
+            for _m2 in _msgs:
+                if str(_m2).strip():
+                    _bank.enqueue(_ck2, BOT_QQ or "bot", "assistant", _m2)
+        except Exception as e:
+            print(f"⚠️ 主动消息入队记忆库失败：{e}")
 
 
 async def _proactive_trigger(websocket):
@@ -4431,7 +4971,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         "Content-Type": "application/json"
     }
     # 系统提示词放在最前面
-    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
+    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "") + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
@@ -4577,6 +5117,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         tools.append(_emoji_tool_def())
     if MEMORY_ENABLED and _mem is not None:
         tools.extend(_memory_tool_defs_v2())
+    tools.extend(_bank_tool_defs())
 
     data = _build_chat_data(DEEPSEEK_MODEL, messages, ENABLE_THINKING_CHAT)
     if tools:
@@ -4633,8 +5174,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.add("send_emoji")
     if MEMORY_ENABLED and _mem is not None:
         _runnable_names.add("remember")
-        if MEMORY_SAVER_MODE:
-            _runnable_names.add("search_memory")
+    if MEMORY_BANK_ENABLED and _bank is not None:
+        _runnable_names.add("search_memory")
     runnable_calls = [
         tc for tc in tool_calls
         if tc.get("function", {}).get("name") in _runnable_names
@@ -4649,8 +5190,18 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         for tool_call in runnable_calls:
             _tool_name = tool_call.get("function", {}).get("name")
 
-            # 记忆工具：remember / search_memory
-            if _tool_name in ("remember", "search_memory"):
+            # 记忆库搜索（语义检索，带前后文）
+            if _tool_name == "search_memory":
+                try:
+                    _bargs = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _bargs = {}
+                _bres = _bank_handle_tool(_tool_name, _bargs if isinstance(_bargs, dict) else {})
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _bres})
+                continue
+
+            # 人物画像记忆工具：remember
+            if _tool_name == "remember":
                 try:
                     _margs = json.loads(tool_call["function"]["arguments"])
                 except Exception:
@@ -4992,7 +5543,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
-    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
+    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "") + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
     # 历史只保留纯文本（图片base64太大不入历史）
     messages.extend(history)
     # 当前用户消息：文字 + 多张图片（一次性投完，不逐张识别）
@@ -5045,6 +5596,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         tools.append(_emoji_tool_def())
     if MEMORY_ENABLED and _mem is not None:
         tools.extend(_memory_tool_defs_v2())
+    tools.extend(_bank_tool_defs())
     # 群管理工具
     if ENABLE_GROUP_MODERATION and is_group:
         tools.append({
@@ -5182,8 +5734,8 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         _runnable_names.add("send_emoji")
     if MEMORY_ENABLED and _mem is not None:
         _runnable_names.add("remember")
-        if MEMORY_SAVER_MODE:
-            _runnable_names.add("search_memory")
+    if MEMORY_BANK_ENABLED and _bank is not None:
+        _runnable_names.add("search_memory")
     if ENABLE_GROUP_MODERATION and is_group:
         _runnable_names.add("group_moderation")
     if ENABLE_VOICE_TOOL:
@@ -5206,8 +5758,18 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         for tool_call in runnable_calls:
             _tool_name = tool_call.get("function", {}).get("name")
 
-            # 记忆工具：remember / search_memory
-            if _tool_name in ("remember", "search_memory"):
+            # 记忆库搜索（语义检索，带前后文）
+            if _tool_name == "search_memory":
+                try:
+                    _bargs = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _bargs = {}
+                _bres = _bank_handle_tool(_tool_name, _bargs if isinstance(_bargs, dict) else {})
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _bres})
+                continue
+
+            # 人物画像记忆工具：remember
+            if _tool_name == "remember":
                 try:
                     _margs = json.loads(tool_call["function"]["arguments"])
                 except Exception:
@@ -5548,6 +6110,14 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
             _mem.save_context(chat_id, is_group, his)
         except Exception as _me:
             print(f"⚠️ 上下文写入记忆失败：{_me}")
+    if MEMORY_BANK_ENABLED and _bank is not None:
+        try:
+            _ck = f"g_{chat_id}" if is_group else f"p_{chat_id}"
+            _bts = time.time()
+            _bank.enqueue(_ck, user_id, "user", user_text, _bts)
+            _bank.enqueue(_ck, BOT_QQ or "bot", "assistant", reply, _bts + 1)
+        except Exception as _be:
+            print(f"⚠️ 记忆库入队失败：{_be}")
     # 回复消息（按段落拆成多条发送，降低人机感）
     _parts = await send_reply_multi(ws, is_group, chat_id, reply, emojis=pending_emojis)
     _where = f"群{chat_id}" if is_group else "私聊"
@@ -5680,6 +6250,10 @@ async def main():
             asyncio.create_task(_mem_fetch_userinfo(ws))
             asyncio.create_task(_mem_userinfo_loop(ws))
             asyncio.create_task(_mem_compress_loop())
+        if MEMORY_BANK_ENABLED and _bank is not None:
+            asyncio.create_task(_bank_worker_loop())
+            asyncio.create_task(_bank_review_loop())
+            print(f"🗃️ 记忆库已启用：上限{MEMORY_BANK_MAX_ENTRIES}条，到{MEMORY_BANK_CLEANUP_AT}条自动清理")
 
         # 启动清理：只删自己遗留的待传临时文件（只跑一次，重连不重复）
         if delivery_mode() != "native":
@@ -6376,6 +6950,27 @@ def _load_config_file():
     MEMORY_DIR = os.environ.get("QQ2_MEMORY_DIR") or s("memory_dir", "") or "/app/memory"
     if MEMORY_ENABLED:
         _mem_init(MEMORY_DIR)
+    # 记忆库（原文归档 + 打分 + 向量检索）
+    global MEMORY_BANK_ENABLED, MEMORY_BANK_MAX_ENTRIES, MEMORY_BANK_CLEANUP_AT, MEMORY_BANK_MAX_DAYS
+    global MEMORY_BANK_SCORE_BATCH, MEMORY_BANK_COLD_THRESHOLD, MEMORY_BANK_COLD_STRIKES
+    global MEMORY_BANK_REVIEW_DAYS, MEMORY_SEARCH_TOPK, MEMORY_RECALL_K
+    global EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
+    MEMORY_BANK_ENABLED = b("memory_bank_enabled", MEMORY_BANK_ENABLED)
+    MEMORY_BANK_MAX_ENTRIES = i("memory_bank_max_entries", MEMORY_BANK_MAX_ENTRIES)
+    MEMORY_BANK_CLEANUP_AT = i("memory_bank_cleanup_at", MEMORY_BANK_CLEANUP_AT)
+    MEMORY_BANK_MAX_DAYS = i("memory_bank_max_days", MEMORY_BANK_MAX_DAYS)
+    MEMORY_BANK_SCORE_BATCH = i("memory_bank_score_batch", MEMORY_BANK_SCORE_BATCH)
+    MEMORY_BANK_COLD_THRESHOLD = i("memory_bank_cold_threshold", MEMORY_BANK_COLD_THRESHOLD)
+    MEMORY_BANK_COLD_STRIKES = i("memory_bank_cold_strikes", MEMORY_BANK_COLD_STRIKES)
+    MEMORY_BANK_REVIEW_DAYS = i("memory_bank_review_days", MEMORY_BANK_REVIEW_DAYS)
+    MEMORY_SEARCH_TOPK = i("memory_search_topk", MEMORY_SEARCH_TOPK)
+    MEMORY_RECALL_K = i("memory_recall_k", MEMORY_RECALL_K)
+    EMBEDDING_API_KEY = s("embedding_api_key", EMBEDDING_API_KEY)
+    EMBEDDING_BASE_URL = s("embedding_base_url", EMBEDDING_BASE_URL)
+    EMBEDDING_MODEL = s("embedding_model", EMBEDDING_MODEL)
+    EMBEDDING_DIM = i("embedding_dim", EMBEDDING_DIM)
+    if MEMORY_BANK_ENABLED:
+        _bank_init(MEMORY_DIR)
 
     # 群聊旁听缓存：没@机器人的群消息也存起来当上下文
     ENABLE_AMBIENT_CACHE = b("enable_ambient_cache", ENABLE_AMBIENT_CACHE)

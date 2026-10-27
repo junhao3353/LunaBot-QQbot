@@ -188,3 +188,40 @@ WebUI：「功能设置 → 对话行为 → 日志打印完整思维链」。
 - 补丁（2026-10-27 之二）：
   - 主动消息（群/私聊）发送后现在会写入 `temp.json` 上下文（`_pro_append_history` → `_mem.save_context`），重启后不丢；多条主动消息全部入历史
   - 主动发说说原来绕过 `_sync_post_qzone` 直发，没进记忆；新增 `_remember_qzone()` 统一记录（旧说说历史 + 临时记忆），主动说说和 `post_qzone` 工具都走它
+
+---
+
+## 十、记忆库（2026-10-27 新增）
+
+> 解决"15 轮上下文刷掉就忘事"的问题：原文全存 + 打分 + 向量语义检索，AI 用工具自己查。
+
+**存储**：`memory/bank.jsonl`（原文+分数+标签+摘要+来源）+ `memory/bank_emb.bin`（float32 向量，1024 维）+ `bank_queue.jsonl`（待评分队列）
+
+**流程**：
+1. 每条消息（用户+AI回复、主动消息）写入队列
+2. 后台每 20 秒取一批（默认 20 条）→ deepseek-chat 打 0-10 分 + 固定标签 + ≤40 字摘要（关思考、低温度）
+3. 摘要向量化（阿里百炼 `text-embedding-v4`，OpenAI 兼容）→ 入库
+4. 检索：向量召回 top 30 → 重排 `0.55×余弦 + 0.2×分数 + 0.15×时间 + 0.1×标签` → 返回 8 条，每条带同聊天前后各一条
+5. 冷存：3 天评估一次 <5 分的旧记忆，AI 判断 keep/cold/delete；冷存不参与检索，连续 3 次低分才删
+6. 清理：到 18000 条自动清理回 15000 条（冷存 > 低分 > 最旧优先），超 180 天且 <7 分的优先清
+7. 首次启动且库为空时，自动把 `temp.json` 现有上下文导入队列
+
+**工具**：`search_memory(query, k, chat)`，程序侧提示词写明触发条件（上次/之前/记得/我说过…）
+
+**配置**：
+```yaml
+memory_bank_enabled: true
+memory_bank_max_entries: 20000
+memory_bank_cleanup_at: 18000
+memory_bank_max_days: 180
+memory_bank_score_batch: 20
+memory_bank_cold_threshold: 5
+memory_bank_cold_strikes: 3
+memory_bank_review_days: 3
+memory_search_topk: 8
+memory_recall_k: 30
+embedding_api_key: ""
+embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+embedding_model: "text-embedding-v4"
+embedding_dim: 1024
+```

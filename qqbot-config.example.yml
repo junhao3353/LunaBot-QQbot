@@ -261,3 +261,24 @@ memory_remember_max_chars: 500
 memory_full_inject_max_chars: 200000
 # 省流模式带最近几个发言人
 memory_recent_speakers: 8
+
+# ---------- 记忆库（原文归档 + 打分 + 向量检索） ----------
+memory_bank_enabled: true
+# 上限与清理：到 cleanup_at 条时清理回 max_entries*0.75
+memory_bank_max_entries: 20000
+memory_bank_cleanup_at: 18000
+# 最多保留天数（超期且分数<7的优先清理）
+memory_bank_max_days: 180
+# 评分：每批多少条 / 低于几分算低分 / 连续几次低分删除 / 几天评估一次
+memory_bank_score_batch: 20
+memory_bank_cold_threshold: 5
+memory_bank_cold_strikes: 3
+memory_bank_review_days: 3
+# 检索：返回几条 / 向量粗召回几条
+memory_search_topk: 8
+memory_recall_k: 30
+# 向量模型：阿里百炼 text-embedding-v4（OpenAI 兼容接口）
+embedding_api_key: ""
+embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+embedding_model: "text-embedding-v4"
+embedding_dim: 1024
