@@ -225,3 +225,7 @@ embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 embedding_model: "text-embedding-v4"
 embedding_dim: 1024
 ```
+
+- 补丁（2026-10-27 之三）：
+  - 记忆库首次导入时解析上下文里的 `[MM-DD HH:MM][QQ号:xxx]` 前缀，还原真实时间/说话人（AI 回复取同轮用户时间+1秒），避免所有历史消息时间都变成"现在"
+  - embedding 已接通阿里百炼（按量付费 key），实测返回 1024 维向量；首次导入 38 条历史上下文完成入库

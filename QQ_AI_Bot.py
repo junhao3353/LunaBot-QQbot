@@ -1336,12 +1336,37 @@ def _bank_init(base_dir):
         if (_bank is not None and not _bank.entries and _mem is not None
                 and not _bank.meta.get("bootstrapped")):
             _n = 0
+            _now = time.time()
+
+            def _parse_hist_time(txt):
+                """从 [10-27 01:58][QQ号:123] 前缀解析时间，返回 (ts, 去掉前缀的正文, qq)"""
+                m = re.match(r"^\[(\d{2})-(\d{2}) (\d{2}):(\d{2})\]\s*(?:\[QQ号:(\d+)\]\s*)?(.*)$", txt, re.S)
+                if not m:
+                    return None, txt, None
+                mo, dd, hh, mi, qq = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5)
+                try:
+                    year = datetime.now().year
+                    ts = datetime(year, mo, dd, hh, mi).timestamp()
+                    if ts > _now + 86400:
+                        ts = datetime(year - 1, mo, dd, hh, mi).timestamp()
+                    return ts, (m.group(6) or "").strip(), qq
+                except Exception:
+                    return None, txt, None
+
             for _key, _msgs in (_mem.temp.get("contexts") or {}).items():
+                _last_ts = None
                 for _m in (_msgs or []):
                     _t = (_m.get("content") or "").strip()
                     if not _t:
                         continue
-                    _bank.enqueue(_key, "unknown", _m.get("role", "user"), _t)
+                    if _m.get("role") == "assistant":
+                        _ats = (_last_ts + 1) if _last_ts else _now
+                        _bank.enqueue(_key, str(BOT_QQ or "bot"), "assistant", _t, _ats)
+                    else:
+                        _ts2, _body, _qq2 = _parse_hist_time(_t)
+                        _ats = _ts2 or _now
+                        _last_ts = _ats
+                        _bank.enqueue(_key, _qq2 or "unknown", "user", _body or _t, _ats)
                     _n += 1
             _bank.meta["bootstrapped"] = True
             _bank._save_meta()
