@@ -478,6 +478,11 @@ def _get_model_config():
         "volc_voice": cfg.get("volc_voice", ""),
         "minimax_api_key": "",  # 不回显
         "has_minimax_api_key": _has_secret(cfg.get("minimax_api_key")),
+        "embedding_api_key": "",  # 不回显（阿里百炼 / 千问）
+        "has_embedding_api_key": _has_secret(cfg.get("embedding_api_key")),
+        "embedding_base_url": cfg.get("embedding_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "embedding_model": cfg.get("embedding_model", "qwen3.7-text-embedding"),
+        "embedding_dim": cfg.get("embedding_dim", 1024),
         "minimax_image_model": cfg.get("minimax_image_model", "image-01"),
         "minimax_image_ratio": cfg.get("minimax_image_ratio", "1:1"),
         "enable_image_command": cfg.get("enable_image_command", True),
@@ -575,6 +580,19 @@ def _save_model_config(data):
             changed = True
         if "volc_voice" in data: cfg["volc_voice"] = str(data["volc_voice"]); changed = True
         if _apply_secret(cfg, "minimax_api_key", data.get("minimax_api_key")):
+            changed = True
+        if _apply_secret(cfg, "embedding_api_key", data.get("embedding_api_key")):
+            changed = True
+        if "embedding_base_url" in data:
+            _eb = str(data["embedding_base_url"] or "").strip()
+            cfg["embedding_base_url"] = _eb or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            changed = True
+        if "embedding_model" in data:
+            _em = str(data["embedding_model"] or "").strip()
+            cfg["embedding_model"] = _em or "qwen3.7-text-embedding"
+            changed = True
+        if "embedding_dim" in data:
+            cfg["embedding_dim"] = _clamp_int(data["embedding_dim"], 256, 2560, 1024)
             changed = True
         if "minimax_image_model" in data: cfg["minimax_image_model"] = str(data["minimax_image_model"]); changed = True
         if "minimax_image_ratio" in data:

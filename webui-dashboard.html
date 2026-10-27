@@ -610,6 +610,31 @@
           </div>
         </div></div>
 
+
+        <!-- 千问 Embedding（记忆库向量） -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#34d399;">千问 Embedding（记忆库向量）</h3>
+          <p class="text-muted small mb-3">阿里云百炼，OpenAI 兼容接口。更换模型或维度后需要清空 <code>memory/bank*</code> 重建向量库。</p>
+          <div class="row gy-3">
+            <div class="col-12">
+              <label class="form-label">千问 API Key</label>
+              <input type="password" class="form-control" id="model_embedding_key" placeholder="sk-xxx">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Base URL</label>
+              <input type="text" class="form-control" id="model_embedding_base" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Embedding 模型</label>
+              <input type="text" class="form-control" id="model_embedding_model" placeholder="qwen3.7-text-embedding">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">向量维度</label>
+              <input type="number" class="form-control" id="model_embedding_dim" placeholder="1024" min="256" max="2560">
+            </div>
+          </div>
+        </div></div>
+
         <!-- 模型选择 -->
         <div class="card mb-4"><div class="card-body">
           <h3 class="h5 mb-3" style="color:#f472b6;">模型选择</h3>
@@ -1241,6 +1266,11 @@
           setSecretHint('model_volc_key', c.has_volc_api_key);
           document.getElementById('model_minimax_key').value = c.minimax_api_key || '';
           setSecretHint('model_minimax_key', c.has_minimax_api_key);
+          document.getElementById('model_embedding_key').value = c.embedding_api_key || '';
+          setSecretHint('model_embedding_key', c.has_embedding_api_key);
+          document.getElementById('model_embedding_base').value = c.embedding_base_url || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+          document.getElementById('model_embedding_model').value = c.embedding_model || 'qwen3.7-text-embedding';
+          document.getElementById('model_embedding_dim').value = c.embedding_dim || 1024;
           document.getElementById('model_minimax_img_model').value = c.minimax_image_model || 'image-01';
           document.getElementById('model_minimax_img_ratio').value = c.minimax_image_ratio || '1:1';
           document.getElementById('model_chat').value = c.deepseek_model || '';
@@ -1273,6 +1303,10 @@
         bocha_api_key: document.getElementById('model_bocha_key').value,
         volc_api_key: document.getElementById('model_volc_key').value,
         minimax_api_key: document.getElementById('model_minimax_key').value,
+        embedding_api_key: document.getElementById('model_embedding_key').value,
+        embedding_base_url: document.getElementById('model_embedding_base').value,
+        embedding_model: document.getElementById('model_embedding_model').value,
+        embedding_dim: parseInt(document.getElementById('model_embedding_dim').value) || 1024,
         minimax_image_model: document.getElementById('model_minimax_img_model').value,
         minimax_image_ratio: document.getElementById('model_minimax_img_ratio').value,
         deepseek_model: document.getElementById('model_chat').value,

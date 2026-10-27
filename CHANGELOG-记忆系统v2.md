@@ -260,3 +260,7 @@ embedding_dim: 1024
 - **换 embedding 模型或维度必须清空 `bank*` 重建**（新旧向量空间不兼容）
 - 经典域名不可用时，可换 CSV 里的 `openAiCompatible` 工作空间专属域名
 - `embedding_api_key` 只存在 `qqbot-config.yml`（已 gitignore，不会提交）
+
+- 补丁（2026-10-27 之四）：
+  - WebUI「模型管理」新增「千问 Embedding（记忆库向量）」配置区：API Key（不回显，留空=不修改）、Base URL、模型、维度；保存走既有白名单+原子写+备份
+  - 修复功能设置页 `setv` 定义先于使用导致的加载失败（TDZ）
