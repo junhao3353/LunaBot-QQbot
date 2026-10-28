@@ -847,6 +847,10 @@
             <label class="pill"><input type="checkbox" id="feat_send_delay"><span class="pill-slider"></span></label>
             <span class="feat-label">发送延迟（模拟人打字）</span>
           </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_typing"><span class="pill-slider"></span></label>
+            <span class="feat-label">私聊「正在输入」状态（群聊不支持）</span>
+          </div>
         </div></div>
 
         <!-- 多媒体 -->
@@ -1349,6 +1353,7 @@
         sw('feat_random_chat', c.enable_random_chat);
         sw('feat_split', c.enable_split_reply);
         sw('feat_send_delay', c.enable_send_delay);
+        sw('feat_typing', c.enable_typing_status);
         sw('feat_video', c.enable_video);
         sw('feat_voice', c.enable_voice);
         sw('feat_emoji', c.enable_emoji);
@@ -1407,6 +1412,7 @@
         follow_up_trigger_count: _pi('feat_followup', 3),
         enable_split_reply: document.getElementById('feat_split').checked,
         enable_send_delay: document.getElementById('feat_send_delay').checked,
+        enable_typing_status: document.getElementById('feat_typing').checked,
         enable_video: document.getElementById('feat_video').checked,
         enable_voice: document.getElementById('feat_voice').checked,
         enable_emoji: document.getElementById('feat_emoji').checked,

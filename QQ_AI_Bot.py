@@ -246,6 +246,7 @@ SHOW_THINKING_CONTENT = False  # true=日志打印完整思维链内容；false=
 REASONING_EFFORT = None        # 思考强度 low/high/max（从配置文件加载，默认high）
 ENABLE_DOWNLOAD = True         # 下载总开关（true=接受下载任务，false=所有下载任务拒绝不回复）
 ENABLE_SEND_DELAY = True       # 发送消息随机延迟开关（防秒回被检测）
+ENABLE_TYPING_STATUS = True    # 私聊发送前显示「正在输入」（群聊不支持，不调用）
 SEND_DELAY_MIN = 1             # 随机延迟最小秒数
 SEND_DELAY_MAX = 5             # 随机延迟最大秒数
 # ---- 分段回复（把AI一段话拆成多条发，降低人机感） ----
@@ -3205,12 +3206,32 @@ async def send_group_msg(websocket, group_id: int, msg: str, no_delay: bool = Fa
         _last_send_ts[group_id] = time.time()
 
 
+async def _set_typing(websocket, user_id: int, on: bool):
+    """私聊显示/取消「正在输入」状态。群聊不支持这个接口，所以只在私聊调用。"""
+    if not ENABLE_TYPING_STATUS:
+        return
+    try:
+        await api_call(websocket, "set_input_status",
+                       {"user_id": str(user_id), "event_type": 1 if on else 2}, timeout=3)
+    except Exception:
+        pass
+
+
 async def send_private_msg(websocket, user_id: int, msg: str, no_delay: bool = False):
     """发送私聊消息（会话锁保证顺序，开启随机延迟时按真人节奏等待再发，防秒回被检测）。
-    no_delay=True 用于分段回复的后续分段（延迟由分段间隔控制）。"""
+    no_delay=True 用于分段回复的后续分段（延迟由分段间隔控制）。
+    开启 enable_typing_status 时：等待前显示「正在输入」，发送前取消。"""
     async with _chat_send_locks[user_id]:
-        if not no_delay and ENABLE_SEND_DELAY and SEND_DELAY_MAX > 0:
-            await _chat_delay(user_id)
+        _typing = (ENABLE_TYPING_STATUS and not no_delay
+                   and ENABLE_SEND_DELAY and SEND_DELAY_MAX > 0)
+        if _typing:
+            await _set_typing(websocket, user_id, True)
+        try:
+            if not no_delay and ENABLE_SEND_DELAY and SEND_DELAY_MAX > 0:
+                await _chat_delay(user_id)
+        finally:
+            if _typing:
+                await _set_typing(websocket, user_id, False)
         await api_call(websocket, "send_private_msg", {"user_id": user_id, "message": msg}, timeout=5)
         _last_send_ts[user_id] = time.time()
 
@@ -3344,7 +3365,15 @@ async def send_reply_multi(websocket, is_group: bool, chat_id: int, reply: str, 
 
     for idx, part in enumerate(parts):
         if idx > 0 and SEND_DELAY_MAX > 0:
-            await asyncio.sleep(random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX))
+            # 私聊后续分段：分段间隔期间也显示「正在输入」
+            _typing_seg = (not is_group) and ENABLE_TYPING_STATUS
+            if _typing_seg:
+                await _set_typing(websocket, chat_id, True)
+            try:
+                await asyncio.sleep(random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX))
+            finally:
+                if _typing_seg:
+                    await _set_typing(websocket, chat_id, False)
         if ENABLE_TTS:
             # 语音模式：优先发语音条，失败降级为文本
             _ok = await _tts_and_send(websocket, is_group, chat_id, part)
@@ -6908,7 +6937,7 @@ def _load_config_file():
     global MINIMAX_API_KEY, MINIMAX_IMAGE_MODEL, MINIMAX_IMAGE_RATIO, MINIMAX_PROMPT_OPTIMIZER
     global ENABLE_IMAGE_COMMAND, ENABLE_IMAGE_TOOL
     global IMAGE_TOOL_RETURN_IMAGE
-    global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX
+    global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX, ENABLE_TYPING_STATUS
     global ENABLE_SPLIT_REPLY, SPLIT_DELAY_MIN, SPLIT_DELAY_MAX, SPLIT_MAX_PARTS, SPLIT_PART_MAX_LEN
     global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY, FOLLOW_UP_TRIGGER_COUNT, FOLLOW_UP_WINDOW_SECONDS
     global ENABLE_PROACTIVE_MSG, ENABLE_PROACTIVE_PRIVATE, ENABLE_PROACTIVE_QZONE, PROACTIVE_IDLE_SECONDS, PROACTIVE_RANDOM_MAX
@@ -6949,6 +6978,7 @@ def _load_config_file():
     # 下载总开关 + 发送消息随机延迟（防检测）
     ENABLE_DOWNLOAD = b("enable_download", ENABLE_DOWNLOAD)
     ENABLE_SEND_DELAY = b("enable_send_delay", ENABLE_SEND_DELAY)
+    ENABLE_TYPING_STATUS = b("enable_typing_status", ENABLE_TYPING_STATUS)
     SEND_DELAY_MIN = i("send_delay_min", SEND_DELAY_MIN)
     SEND_DELAY_MAX = i("send_delay_max", SEND_DELAY_MAX)
     if SEND_DELAY_MIN < 0: SEND_DELAY_MIN = 0

@@ -527,6 +527,7 @@ def _get_features_config():
         "follow_up_trigger_count": cfg.get("follow_up_trigger_count", 3),
         "enable_split_reply": cfg.get("enable_split_reply", True),
         "enable_send_delay": cfg.get("enable_send_delay", True),
+        "enable_typing_status": cfg.get("enable_typing_status", True),
         # 多媒体
         "enable_video": cfg.get("enable_video", True),
         "enable_voice": cfg.get("enable_voice", True),
@@ -649,6 +650,7 @@ def _save_features_config(data):
         if "follow_up_trigger_count" in data: cfg["follow_up_trigger_count"] = _clamp_int(data["follow_up_trigger_count"], 0, 10, 3); changed = True
         if "enable_split_reply" in data: cfg["enable_split_reply"] = _b("enable_split_reply"); changed = True
         if "enable_send_delay" in data: cfg["enable_send_delay"] = _b("enable_send_delay"); changed = True
+        if "enable_typing_status" in data: cfg["enable_typing_status"] = _b("enable_typing_status"); changed = True
         # 多媒体
         if "enable_video" in data: cfg["enable_video"] = _b("enable_video"); changed = True
         if "enable_voice" in data: cfg["enable_voice"] = _b("enable_voice"); changed = True
