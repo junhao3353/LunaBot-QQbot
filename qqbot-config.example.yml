@@ -52,6 +52,8 @@ enable_download: true
 # 发送消息随机延迟（防秒回被检测）：true=开启，false=关闭（秒回）
 enable_send_delay: true
 enable_typing_status: true
+enable_input_status: true
+input_status_grace: 5
 # 随机延迟范围（秒），发送每条消息前随机等待
 send_delay_min: 3
 send_delay_max: 8

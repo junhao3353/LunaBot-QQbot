@@ -2645,10 +2645,13 @@ ENABLE_VOICE = True             # 语音转文字总开关：false=不处理群�
 # ===================== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====================
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
 MERGE_WAIT_SECONDS = 20             # 合并窗口（秒）：N秒内无新消息才处理（真人也不会秒回，拉长些让大家充分发完，防止多人@时漏消息）
+ENABLE_INPUT_STATUS = True          # 用「对方正在输入」事件优化：停止输入后提前回复
+INPUT_STATUS_GRACE = 5              # 停止输入后多少秒触发回复
 MERGE_MAX_COUNT = 10                # 超过多少条直接处理（防刷屏）
 _merge_buf = {}                     # chat_id -> [msg dict] 待合并缓冲
 _merge_workers = {}                 # chat_id -> asyncio.Task 每会话一个防抖worker
 _merge_last_ts = {}                 # chat_id -> 最后一条消息入缓冲的时间戳
+_typing_state = {}                  # chat_id -> {"typing": bool, "ts": 输入中时间, "stop_ts": 停止时间}
 _record_cache = {}
 _RECORD_CACHE_TTL = 120         # 语音转写缓存120秒
 _WHISPER_MODEL = None           # Whisper模型全局复用（避免每条语音/视频重复加载）
@@ -6231,6 +6234,37 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
     _pro_reset_by_api()
 
 
+def _on_input_status(data):
+    """NapCat「输入状态」通知：记录谁在打字、什么时候停，供合并 worker 提前触发。"""
+    if not ENABLE_INPUT_STATUS:
+        return
+    try:
+        uid = int(data.get("user_id") or 0)
+        gid = int(data.get("group_id") or 0)
+    except Exception:
+        return
+    chat_id = gid or uid
+    if not chat_id:
+        return
+    et = data.get("event_type")
+    now = time.time()
+    st = _typing_state.setdefault(chat_id, {})
+    st["status_text"] = str(data.get("status_text") or "")
+    _was = bool(st.get("typing"))
+    if et == 1:
+        st["typing"] = True
+        st["ts"] = now
+    elif et == 2:
+        st["typing"] = False
+        st["stop_ts"] = now
+    else:
+        return
+    if bool(st.get("typing")) != _was:
+        print(f"⌨️ 输入状态：{'群' if gid else '私聊'}{chat_id} "
+              f"{'开始输入' if st.get('typing') else '停止输入'}"
+              + (f"（{st.get('status_text')}）" if st.get("status_text") else ""))
+
+
 async def _merge_worker(ws, chat_id, is_group):
     """消息合并防抖worker：每会话一个。
     窗口逻辑：条数未到上限且距最后一条未到等待时长 → 继续等；条数到上限 → 立即处理。
@@ -6240,9 +6274,27 @@ async def _merge_worker(ws, chat_id, is_group):
             buf = _merge_buf.get(chat_id, [])
             if not buf:
                 break
-            while len(buf) < MERGE_MAX_COUNT and (time.time() - _merge_last_ts.get(chat_id, 0)) < MERGE_WAIT_SECONDS:
-                await asyncio.sleep(0.5)
+            while True:
                 buf = _merge_buf.get(chat_id, [])
+                if not buf or len(buf) >= MERGE_MAX_COUNT:
+                    break
+                now = time.time()
+                last = _merge_last_ts.get(chat_id, 0)
+                st = _typing_state.get(chat_id) or {}
+                # 1) 对方正在打字（60秒内有输入事件）→ 先不回复
+                if ENABLE_INPUT_STATUS and st.get("typing") and (now - float(st.get("ts") or 0) < 60):
+                    await asyncio.sleep(0.4)
+                    continue
+                # 2) 刚停止输入 → 停止满 grace 秒就立刻处理（不用等满合并窗口）
+                if ENABLE_INPUT_STATUS and st.get("stop_ts") and (now - float(st["stop_ts"]) < 120):
+                    if now - float(st["stop_ts"]) >= INPUT_STATUS_GRACE:
+                        break
+                    await asyncio.sleep(0.3)
+                    continue
+                # 3) 兜底：原来的合并窗口
+                if now - last >= MERGE_WAIT_SECONDS:
+                    break
+                await asyncio.sleep(0.5)
             msgs = _merge_buf.pop(chat_id, [])
             if not msgs:
                 break
@@ -6284,6 +6336,7 @@ async def _merge_worker(ws, chat_id, is_group):
     finally:
         _merge_workers.pop(chat_id, None)
         _merge_last_ts.pop(chat_id, None)   # 别让这个字典随会话数无限增长
+    _typing_state.pop(chat_id, None)
 
 
 # 说明：max_size 放宽到 64MB。默认 1MB 时，发 base64 表情/大图后 NapCat 回传的事件会超限触发 1009 断连
@@ -6305,7 +6358,7 @@ async def main():
             print(f"🧠 视觉模型思考模式：{'开启(' + REASONING_EFFORT + ')' if ENABLE_THINKING_VISION else '关闭'}（模型：{DEEPSEEK_VISION_MODEL}）")
         print("📥 本子下载已开启：群/私聊直接发「下载本子<ID>」或「下载<ID>」(默认第1章)，加 pN 选章节，完成自动清理缓存")
         if ENABLE_MERGE:
-            print(f"🧩 消息合并已开启：连续消息{MERGE_WAIT_SECONDS}秒内无新消息或攒够{MERGE_MAX_COUNT}条→合并成一次AI回复（防多条回复混在一起）")
+            print(f"🧩 消息合并已开启：连续消息{MERGE_WAIT_SECONDS}秒内无新消息或攒够{MERGE_MAX_COUNT}条→合并成一次AI回复；检测到输入状态时停止输入{INPUT_STATUS_GRACE}秒即回复")
         else:
             print("🧩 消息合并已关闭：每条消息立即单独回复")
         # 不再自动刷新v2 cookie（避免触发aweme/detail API风控）
@@ -6424,6 +6477,11 @@ async def main():
                 data = await event_queue.get()
                 if data is None:  # 连接已断开
                     break
+                # 输入状态事件（NapCat 扩展）：用于提前触发回复
+                if data.get("post_type") == "notice":
+                    if data.get("notice_type") == "notify" and data.get("sub_type") == "input_status":
+                        _on_input_status(data)
+                    continue
                 # 只处理消息事件
                 if data.get("post_type") != "message":
                     continue
@@ -6947,7 +7005,7 @@ def _load_config_file():
     global ENABLE_AMBIENT_CACHE, AMBIENT_MAX_MSGS, AMBIENT_MSG_MAX_LEN
     global ENABLE_EMOJI, EMOJI_DIR, EMOJI_MAP
     global ENABLE_VIDEO, ENABLE_VOICE
-    global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT
+    global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT, ENABLE_INPUT_STATUS, INPUT_STATUS_GRACE
     global ENABLE_FILE_READ, FILE_READ_MAX_CHARS, _FILE_CACHE_TTL
     global ENABLE_TTS, TTS_ENGINE, TTS_VOICE, VOLC_API_KEY, VOLC_VOICE, MINIMAX_TTS_MODEL, MINIMAX_TTS_VOICE, MINIMAX_TTS_SPEED, MINIMAX_TTS_VOL, MINIMAX_TTS_PITCH, BOT_NAME
 
@@ -7138,6 +7196,9 @@ def _load_config_file():
             print(f"🎙️ AI回复转语音已开启：edge-tts 音色={TTS_VOICE}")
     ENABLE_MERGE = b("enable_message_merge", ENABLE_MERGE)
     MERGE_WAIT_SECONDS = i("merge_wait_seconds", MERGE_WAIT_SECONDS)
+    ENABLE_INPUT_STATUS = b("enable_input_status", ENABLE_INPUT_STATUS)
+    INPUT_STATUS_GRACE = i("input_status_grace", INPUT_STATUS_GRACE)
+    if INPUT_STATUS_GRACE < 1: INPUT_STATUS_GRACE = 1
     MERGE_MAX_COUNT = i("merge_max_count", MERGE_MAX_COUNT)
     if MERGE_WAIT_SECONDS < 1: MERGE_WAIT_SECONDS = 1
     if MERGE_MAX_COUNT < 1: MERGE_MAX_COUNT = 1

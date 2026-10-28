@@ -279,3 +279,9 @@ embedding_dim: 1024
   - 私聊「正在输入」状态：发送延迟期间调用 `set_input_status(event_type=1)`，发送前取消（event_type=2），模拟真人打字
   - 分段回复的私聊分段，间隔期间同样显示输入状态；群聊不支持该接口，全程不调用
   - 开关 `enable_typing_status`（默认开），WebUI 功能设置「私聊「正在输入」状态（群聊不支持）」
+
+- 补丁（2026-10-28 之四）：
+  - 接入 NapCat「输入状态」通知（notice/notify/input_status）：记录谁在打字、何时停下
+  - 合并窗口改为动态：对方正在输入时继续等；停止输入满 `input_status_grace`（默认 5 秒）立即触发回复；无输入事件时仍按 `merge_wait_seconds`（20 秒）
+  - 状态变化打印到日志（⌨️ 输入状态：群/私聊 开始输入/停止输入）
+  - 配置 `enable_input_status` / `input_status_grace`，WebUI 功能设置可调（开关 + 秒数）

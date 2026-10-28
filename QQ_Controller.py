@@ -520,6 +520,8 @@ def _get_features_config():
         "ambient_max_msgs": cfg.get("ambient_max_msgs", 10),
         # 消息处理
         "enable_message_merge": cfg.get("enable_message_merge", True),
+        "enable_input_status": cfg.get("enable_input_status", True),
+        "input_status_grace": cfg.get("input_status_grace", 5),
         "merge_wait_seconds": cfg.get("merge_wait_seconds", 20),
         "merge_max_count": cfg.get("merge_max_count", 10),
         "enable_random_chat": cfg.get("enable_random_chat", True),
@@ -641,6 +643,8 @@ def _save_features_config(data):
         if "ambient_max_msgs" in data: cfg["ambient_max_msgs"] = _clamp_int(data["ambient_max_msgs"], 1, 50, 10); changed = True
         # 消息处理
         if "enable_message_merge" in data: cfg["enable_message_merge"] = _b("enable_message_merge"); changed = True
+        if "enable_input_status" in data: cfg["enable_input_status"] = _b("enable_input_status"); changed = True
+        if "input_status_grace" in data: cfg["input_status_grace"] = _clamp_int(data["input_status_grace"], 1, 60, 5); changed = True
         if "merge_wait_seconds" in data: cfg["merge_wait_seconds"] = _clamp_int(data["merge_wait_seconds"], 5, 120, 20); changed = True
         if "merge_max_count" in data: cfg["merge_max_count"] = _clamp_int(data["merge_max_count"], 2, 30, 10); changed = True
         if "enable_random_chat" in data: cfg["enable_random_chat"] = _b("enable_random_chat"); changed = True

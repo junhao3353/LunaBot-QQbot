@@ -851,6 +851,11 @@
             <label class="pill"><input type="checkbox" id="feat_typing"><span class="pill-slider"></span></label>
             <span class="feat-label">私聊「正在输入」状态（群聊不支持）</span>
           </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_input_status"><span class="pill-slider"></span></label>
+            <span class="feat-label">按输入状态提前回复（停止输入后）</span>
+            <div class="feat-param"><label>秒</label><input type="number" class="form-control" id="feat_input_grace" min="1" max="60"></div>
+          </div>
         </div></div>
 
         <!-- 多媒体 -->
@@ -1354,6 +1359,8 @@
         sw('feat_split', c.enable_split_reply);
         sw('feat_send_delay', c.enable_send_delay);
         sw('feat_typing', c.enable_typing_status);
+        sw('feat_input_status', c.enable_input_status);
+        setv('feat_input_grace', c.input_status_grace ?? 5);
         sw('feat_video', c.enable_video);
         sw('feat_voice', c.enable_voice);
         sw('feat_emoji', c.enable_emoji);
@@ -1413,6 +1420,8 @@
         enable_split_reply: document.getElementById('feat_split').checked,
         enable_send_delay: document.getElementById('feat_send_delay').checked,
         enable_typing_status: document.getElementById('feat_typing').checked,
+        enable_input_status: document.getElementById('feat_input_status').checked,
+        input_status_grace: _pi('feat_input_grace', 5),
         enable_video: document.getElementById('feat_video').checked,
         enable_voice: document.getElementById('feat_voice').checked,
         enable_emoji: document.getElementById('feat_emoji').checked,
