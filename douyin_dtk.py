@@ -12,10 +12,12 @@ DTK v5 架构：
 from __future__ import annotations
 
 import os
+import ipaddress
 import re
+import socket
 import time
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -43,6 +45,66 @@ def _host_allowed(url: str) -> bool:
     if not host:
         return False
     return host in _ALLOWED_HOSTS or any(host.endswith("." + h) for h in _ALLOWED_HOSTS)
+
+
+# 媒体直链用的通用 SSRF 防护：允许公网任意 CDN（DTK 返回的域名经常不在官方白名单里），
+# 只拦截内网/本机/保留地址，防止被当成探测内网的跳板。
+_BAD_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+
+
+def _url_is_public(url: str) -> bool:
+    """URL 是否是可安全下载的公网地址（http/https + 主机能解析到公网 IP）"""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False
+        host = (p.hostname or "").lower().rstrip(".")
+        if not host or host in _BAD_HOSTNAMES or host.endswith(".local") or host.endswith(".internal"):
+            return False
+        # 主机本身就是 IP：直接判断
+        try:
+            ip = ipaddress.ip_address(host)
+            return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                        or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+        except ValueError:
+            pass
+        # 域名：解析后所有地址都必须是公网
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception:
+            return False
+        if not infos:
+            return False
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+            except Exception:
+                return False
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _safe_get(url: str, headers: dict, timeout: float, max_redirects: int = 5):
+    """手动跟随跳转，每一跳都校验公网地址，避免 302 到内网（SSRF）"""
+    cur = url
+    for _ in range(max_redirects + 1):
+        if not _url_is_public(cur):
+            raise ValueError("下载地址不是公网地址")
+        r = requests.get(cur, headers=headers, timeout=timeout, stream=True, allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("Location"):
+            loc = r.headers["Location"]
+            try:
+                r.close()
+            except Exception:
+                pass
+            cur = urljoin(cur, loc)
+            continue
+        return r
+    raise ValueError("跳转次数过多")
 
 
 # 下载抖音资源时用的请求头（不带 Referer 抖音会 403）
@@ -300,12 +362,12 @@ def fetch_file(base: str, api_key: str, download_id: str, name: str, dest_path: 
     url = _url_cache.get((download_id, name))
     if not url:
         return {"err": f"找不到 {name} 的下载链接（内部缓存丢失）"}
-    if not _host_allowed(url):
-        return {"err": "资源地址不在抖音官方域名内，已拒绝下载"}
+    if not _url_is_public(url):
+        return {"err": "资源地址不是公网地址（内网/本机/非法），已拒绝下载"}
     limit_bytes = int(max(1.0, float(max_mb)) * 1024 * 1024)
     try:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with requests.get(url, headers=_DL_HEADERS, timeout=timeout, stream=True) as r:
+        with _safe_get(url, _DL_HEADERS, timeout) as r:
             if r.status_code != 200:
                 return {"err": f"下载失败 HTTP {r.status_code}"}
             try:
