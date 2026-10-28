@@ -469,7 +469,7 @@ def _special_prompt_block(uid=None) -> str:
     注意措辞要软：合并批次里常常还有别的群友，不能让模型以为"其他人的话不用理"。"""
     if not SPECIAL_PROMPT_ENABLED or not SPECIAL_PROMPT:
         return ""
-    name = (SPECIAL_PROMPT_NAME or "老爹").strip()
+    name = (SPECIAL_PROMPT_NAME or "专属用户").strip()
     _qq = str(uid) if uid else ""
     title = (SPECIAL_PROMPT_TITLE or "{name}的专属设定").replace("{name}", name)
     if SPECIAL_PROMPT_HEADER:
@@ -7246,7 +7246,7 @@ def _load_config_file():
     SPECIAL_PROMPT_ENABLED = b("special_prompt_enabled", SPECIAL_PROMPT_ENABLED)
     SPECIAL_PROMPT = s("special_prompt", SPECIAL_PROMPT)
     SPECIAL_PROMPT_USERS = lst("special_prompt_users", SPECIAL_PROMPT_USERS)
-    SPECIAL_PROMPT_NAME = (s("special_prompt_name", SPECIAL_PROMPT_NAME) or "老爹").strip()
+    SPECIAL_PROMPT_NAME = (s("special_prompt_name", SPECIAL_PROMPT_NAME) or "专属用户").strip()
     SPECIAL_PROMPT_TITLE = s("special_prompt_title", SPECIAL_PROMPT_TITLE) or "{name}的专属设定"
     SPECIAL_PROMPT_HEADER = s("special_prompt_header", SPECIAL_PROMPT_HEADER) or ""
     BOT_NAME = s("bot_name", BOT_NAME)

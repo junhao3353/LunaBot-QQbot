@@ -231,8 +231,8 @@ special_prompt_enabled: true
 # 白名单用户的固定称呼（硬编码）
 special_prompt_name: "老爹"
 # 注入时的小标题与开场白（支持 {name}/{qq} 占位符；header 留空=默认）
-special_prompt_title: \"{name}的专属设定\"
-special_prompt_header: \"\"
+special_prompt_title: "{name}的专属设定"
+special_prompt_header: ""
 # 白名单QQ号（群聊/私聊都算）
 special_prompt_users:
   - 123456789
