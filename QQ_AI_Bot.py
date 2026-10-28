@@ -6311,12 +6311,20 @@ async def _merge_worker(ws, chat_id, is_group):
                 # 检查是不是同一个人发的
                 user_ids = set(_m["user_id"] for _m in msgs)
                 if len(user_ids) == 1:
-                    # 同一个人连续发的
+                    # 同一个人连续发的；如果全是"发来图片/视频/语音"，合并成一句
+                    if all(str(_m["user_text"]).startswith("（发来") for _m in msgs):
+                        user_text = f"（连续发来{len(msgs)}条媒体消息，内容见图片/视频/语音，请直接回复）"
+                        display_text = " | ".join(_m["display_text"] for _m in msgs)
+                        reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
+                        _media_merged = True
+                    else:
+                        _media_merged = False
                     _lines = []
-                    for _i, _m in enumerate(msgs, 1):
-                        _t = (_m["user_text"] or "").strip() or "（空消息）"
-                        _lines.append(f"第{_i}条：{_t}")
-                    user_text = f"（你连续发送了{len(msgs)}条消息，这是一次连续发送，请一并回复）\n" + "\n".join(_lines)
+                    if not _media_merged:
+                        for _i, _m in enumerate(msgs, 1):
+                            _t = (_m["user_text"] or "").strip() or "（空消息）"
+                            _lines.append(f"第{_i}条：{_t}")
+                        user_text = f"（你连续发送了{len(msgs)}条消息，这是一次连续发送，请一并回复）\n" + "\n".join(_lines)
                     display_text = " | ".join(_m["display_text"] for _m in msgs)
                     reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
                 else:
@@ -6814,9 +6822,20 @@ async def main():
                         user_text = extract_user_text(cq_msg, self_id)
                     if _file_note:
                         user_text = (user_text + '\n' + _file_note).strip()
-                    # 私聊屏蔽纯[无文字]标签（napcat对空消息/纯图片返回的占位符），但"xxx[无文字]"这种含其他内容的不屏蔽
+                    # 私聊的 [无文字] 占位符：纯文字空消息才丢弃；
+                    # 纯图片/视频/语音要当成一条消息继续走合并，否则得再补一句文字才会触发回复
                     if not is_group and user_text.strip() in ("[无文字]", "无文字"):
-                        continue
+                        _has_img = "[CQ:image" in cq_msg
+                        _has_vid = ("[CQ:video" in cq_msg) or ("[CQ:file" in cq_msg)
+                        _has_rec = "[CQ:record" in cq_msg
+                        if _has_img:
+                            user_text = "（发来一张图片）"
+                        elif _has_vid:
+                            user_text = "（发来一段视频）"
+                        elif _has_rec:
+                            user_text = "（发来一条语音）"
+                        else:
+                            continue
 
                 # 控制器指令过滤：只有控制器白名单用户发的指令AI才跳过，非白名单正常回复（避免其他人发"重启服务"没人理）
                 if (CONTROLLER_ALLOWED_USERS and user_id in CONTROLLER_ALLOWED_USERS
