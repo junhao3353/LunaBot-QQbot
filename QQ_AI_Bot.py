@@ -399,11 +399,11 @@ MEMORY_RECALL_HINT = """
 PROACTIVE_TOOL_PROMPT = """
 
 【顺手用工具，别等人点名】
-下面这些是你自己表达情绪、活跃气氛的手段，不是等群友提才动的按钮。看到合适的场合就主动用，不要等别人说"发个表情包""发条说说"：
-- 表情包（send_emoji）：聊天聊顺了，想表达开心、无语、吐槽、阴阳、附和、撒娇时，主动发一张。一轮最多一张；不确定那张图什么样子可以先 action=view 看一眼，再 action=send 发出去，用 after 决定插在第几条消息后面（0=先图后文，1=第一句后面）。严肃话题、查资料、吵架时别发。
-- 说说（post_qzone）：想分享一句心情、吐槽、日常，或者群里刚好冷场、话题刚收尾、聊到有意思的事时，可以主动发一条说说，像随手发个动态，不用等别人叫你发。内容短、口语、像人话；同一天最多两条别刷屏；不要把群友的聊天内容原样搬上去。
-- 语音（send_voice）：想逗人、撒娇、强调语气时偶尔发一条，别整段对话都用语音。
-判断标准只有一个：这个场合真的合适吗？合适就发，不合适别硬发。发完不要再解释"我刚发了个表情包/说说"，那很出戏。
+这些是你自己表达情绪、活跃气氛的手段，合适就用，不用等群友点名：
+- 表情包（send_emoji）：聊顺了想表达开心/无语/吐槽/撒娇时发一张，一轮最多一张；不确定图长什么样先 action=view 看一眼。严肃话题别发。
+- 说说（post_qzone）：想分享心情、冷场、话题收尾时发一条，短、口语；一天最多两条，别搬群友原话。
+- 语音（send_voice）：逗人、撒娇、强调语气时偶尔发，别整段用语音。
+合适就发，不合适别硬发；发完别解释。
 """
 
 # 系统核心提示词（硬编码，用户不可修改，程序运行必需）
@@ -612,6 +612,7 @@ MEMORY_FULL_INJECT_MAX_CHARS = 200000
 MEMORY_RECENT_SPEAKERS = 8
 MEMORY_DIGEST_ENABLED = True
 MEMORY_DIGEST_MAX = 20
+MEMORY_OTHER_CONTEXT_MSGS = 5   # 异类会话（私聊里看群/群里看私聊）只带最近几条
 
 _mem = None
 _mem_lock = threading.RLock()
@@ -882,7 +883,7 @@ class MemoryV2:
             lines.append(f"QQ {qq} 昵称 {u.get('nickname') or '无'}" + ("；" + "；".join(gs) if gs else ""))
         return "\n".join(lines)
 
-    def render_temp(self, exclude_key=None):
+    def render_temp(self, exclude_key=None, other_max_msgs=None):
         """渲染上下文/说说/摘要/备忘。exclude_key=当前会话的 key（g_群号 / p_QQ），
         当前会话的历史已经通过 messages 传给模型了，这里排除掉避免重复计费。"""
         parts = []
@@ -891,9 +892,13 @@ class MemoryV2:
                 continue
             if not isinstance(msgs, list) or not msgs:
                 continue
+            _limit = MEMORY_CONTEXT_ROUNDS * 2
+            # 异类会话（当前在私聊就看群上下文 / 当前在群聊就看私聊上下文）只带少量，省 token
+            if other_max_msgs and exclude_key and key[:2] != exclude_key[:2]:
+                _limit = min(_limit, max(1, int(other_max_msgs)))
             label = f"群聊 {key[2:]}" if key.startswith("g_") else f"私聊 {key[2:]}"
             lines = [f"[{label}]"]
-            for m in msgs[-MEMORY_CONTEXT_ROUNDS * 2:]:
+            for m in msgs[-_limit:]:
                 role = "你" if m.get("role") == "assistant" else "群友"
                 content = (m.get("content") or "").replace("\n", " ").strip()
                 if content:
@@ -1564,7 +1569,7 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
         _cur_key = (f"g_{int(obj_id)}" if is_group else f"p_{int(obj_id)}") if obj_id else None
     except Exception:
         _cur_key = None
-    tmp = _mem.render_temp(exclude_key=_cur_key)
+    tmp = _mem.render_temp(exclude_key=_cur_key, other_max_msgs=MEMORY_OTHER_CONTEXT_MSGS)
     if tmp:
         parts.append("【临时记忆·上下文/说说/备忘】\n" + tmp)
     text = "\n\n".join(parts)
@@ -5122,11 +5127,11 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     # system 拆两条：前面是稳定内容（每轮不变，能命中 DeepSeek 前缀缓存 ¥0.2/M），
     # 后面单独放记忆块（每轮变化，但只让它自己未命中，不拖累前缀）
     _sys_stable = (build_system_prompt()
-                   + (_special_prompt_block(user_id) if special else "")
                    + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
                    + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
                    + _tts_sound_tag_hint())
-    _sys_mem = _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
+    _sys_mem = (_special_prompt_block(user_id) if special else "") + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
     messages = [{"role": "system", "content": _sys_stable}]
     if _sys_mem:
         messages.append({"role": "system", "content": _sys_mem})
@@ -5704,11 +5709,11 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
     # system 拆两条：前面是稳定内容（每轮不变，能命中 DeepSeek 前缀缓存 ¥0.2/M），
     # 后面单独放记忆块（每轮变化，但只让它自己未命中，不拖累前缀）
     _sys_stable = (build_system_prompt()
-                   + (_special_prompt_block(user_id) if special else "")
                    + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
                    + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
                    + _tts_sound_tag_hint())
-    _sys_mem = _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
+    _sys_mem = (_special_prompt_block(user_id) if special else "") + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
     messages = [{"role": "system", "content": _sys_stable}]
     if _sys_mem:
         messages.append({"role": "system", "content": _sys_mem})
@@ -7181,7 +7186,7 @@ def _load_config_file():
     global MEMORY_ENABLED, MEMORY_SAVER_MODE, MEMORY_DIR, MEMORY_PROFILE_MAX_CHARS, MEMORY_COMPRESS_THRESHOLD
     global MEMORY_COMPRESS_TARGET, MEMORY_COMPRESS_INTERVAL, MEMORY_CONTEXT_ROUNDS, MEMORY_QZONE_MAX
     global MEMORY_MEMO_MAX, MEMORY_REMEMBER_MAX_CHARS, MEMORY_FULL_INJECT_MAX_CHARS, MEMORY_RECENT_SPEAKERS
-    global MEMORY_DIGEST_ENABLED, MEMORY_DIGEST_MAX
+    global MEMORY_DIGEST_ENABLED, MEMORY_DIGEST_MAX, MEMORY_OTHER_CONTEXT_MSGS
     MEMORY_ENABLED = b("memory_enabled", MEMORY_ENABLED)
     MEMORY_SAVER_MODE = b("memory_saver_mode", MEMORY_SAVER_MODE)
     MEMORY_PROFILE_MAX_CHARS = i("memory_profile_max_chars", MEMORY_PROFILE_MAX_CHARS)
@@ -7196,6 +7201,7 @@ def _load_config_file():
     MEMORY_RECENT_SPEAKERS = i("memory_recent_speakers", MEMORY_RECENT_SPEAKERS)
     MEMORY_DIGEST_ENABLED = b("memory_digest_enabled", MEMORY_DIGEST_ENABLED)
     MEMORY_DIGEST_MAX = i("memory_digest_max", MEMORY_DIGEST_MAX)
+    MEMORY_OTHER_CONTEXT_MSGS = i("memory_other_context_msgs", MEMORY_OTHER_CONTEXT_MSGS)
     if MEMORY_COMPRESS_TARGET >= MEMORY_COMPRESS_THRESHOLD:
         MEMORY_COMPRESS_TARGET = max(300, MEMORY_COMPRESS_THRESHOLD - 400)
     MEMORY_DIR = os.environ.get("QQ2_MEMORY_DIR") or s("memory_dir", "") or "/app/memory"

@@ -259,6 +259,7 @@ memory_compress_target: 1400
 memory_compress_interval: 300
 # 每个聊天框保留上下文轮数 / 说说条数 / 临时备忘条数
 memory_context_rounds: 15
+memory_other_context_msgs: 5
 memory_qzone_max: 15
 memory_memo_max: 10
 # 单次记记忆最大字数
