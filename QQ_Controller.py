@@ -514,6 +514,12 @@ def _get_features_config():
         "memory_compress_threshold": cfg.get("memory_compress_threshold", 2000),
         "memory_context_rounds": cfg.get("memory_context_rounds", 15),
         "memory_compress_interval": cfg.get("memory_compress_interval", 300),
+        "special_prompt_enabled": cfg.get("special_prompt_enabled", True),
+        "special_prompt_name": cfg.get("special_prompt_name", "老爹"),
+        "special_prompt_users": cfg.get("special_prompt_users") or [],
+        "special_prompt_title": cfg.get("special_prompt_title", "{name}的专属设定"),
+        "special_prompt_header": cfg.get("special_prompt_header", ""),
+        "special_prompt": cfg.get("special_prompt", ""),
         "memory_bank_enabled": cfg.get("memory_bank_enabled", True),
         "memory_bank_max_entries": cfg.get("memory_bank_max_entries", 20000),
         "memory_search_topk": cfg.get("memory_search_topk", 8),
@@ -637,6 +643,22 @@ def _save_features_config(data):
         if "memory_compress_threshold" in data: cfg["memory_compress_threshold"] = _clamp_int(data["memory_compress_threshold"], 200, 8000, 2000); changed = True
         if "memory_context_rounds" in data: cfg["memory_context_rounds"] = _clamp_int(data["memory_context_rounds"], 1, 100, 15); changed = True
         if "memory_compress_interval" in data: cfg["memory_compress_interval"] = _clamp_int(data["memory_compress_interval"], 60, 3600, 300); changed = True
+        if "special_prompt_enabled" in data: cfg["special_prompt_enabled"] = _b("special_prompt_enabled"); changed = True
+        if "special_prompt_name" in data: cfg["special_prompt_name"] = str(data["special_prompt_name"] or "老爹").strip(); changed = True
+        if "special_prompt_title" in data: cfg["special_prompt_title"] = str(data["special_prompt_title"] or "{name}的专属设定").strip(); changed = True
+        if "special_prompt_header" in data: cfg["special_prompt_header"] = str(data["special_prompt_header"] or ""); changed = True
+        if "special_prompt" in data: cfg["special_prompt"] = str(data["special_prompt"] or ""); changed = True
+        if "special_prompt_users" in data:
+            _raw_u = data["special_prompt_users"]
+            if isinstance(_raw_u, str):
+                _raw_u = re.split(r"[,，\s]+", _raw_u)
+            _users = []
+            for _x in (_raw_u or []):
+                _xs = str(_x).strip()
+                if _xs.isdigit():
+                    _users.append(int(_xs))
+            cfg["special_prompt_users"] = _users
+            changed = True
         if "memory_bank_enabled" in data: cfg["memory_bank_enabled"] = _b("memory_bank_enabled"); changed = True
         if "memory_bank_max_entries" in data: cfg["memory_bank_max_entries"] = _clamp_int(data["memory_bank_max_entries"], 1000, 200000, 20000); changed = True
         if "memory_search_topk" in data: cfg["memory_search_topk"] = _clamp_int(data["memory_search_topk"], 1, 20, 8); changed = True

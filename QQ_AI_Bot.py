@@ -343,7 +343,9 @@ SYSTEM_PROMPT = None  # 人设从 qqbot-config.yml 的 system_prompt 加载（�
 SPECIAL_PROMPT_ENABLED = True
 SPECIAL_PROMPT = None       # 专属提示词正文（硬编码了称呼，比如"老爹"）
 SPECIAL_PROMPT_USERS = None  # 白名单QQ号列表
-SPECIAL_PROMPT_NAME = "老爹"  # 白名单用户的固定称呼（硬编码，不需要查QQ号/调工具认人）
+SPECIAL_PROMPT_NAME = "老爹"  # 白名单用户的固定称呼
+SPECIAL_PROMPT_TITLE = "{name}的专属设定"   # 注入时的小标题（支持 {name}）
+SPECIAL_PROMPT_HEADER = ""                # 注入时的开场白（支持 {name}/{qq}，留空=默认）
 BOT_QQ = None  # 机器人QQ号，启动时通过get_login_info自动获取
 BOT_NAME = "DeepSeek"  # 机器人名字，配置文件可改
 
@@ -353,7 +355,7 @@ REPLY_STYLE_PROMPT = """
 【回复风格硬性规则】
 1. 像真实群友一样说话：短、松、随意，正常人聊天一次就说1-2句话，最多3句
 2. 禁止客服腔、助手腔、小作文，别讲大道理，别科普，别列步骤
-3. 标点只用：，？！ 这三个。禁止用句号、省略号、波浪号、冒号、分号
+3. 标点只用：，？！ 这三个。禁止用句号、分号，省略号
 4. 禁止任何动作描写，比如（挠头）(叹气)【捂脸】这种
 5. 禁止自称AI、助手、语言模型、机器人，你就是群里的一个人
 6. 别人问的问题没那么复杂的时候，直接说重点，别铺垫
@@ -468,10 +470,17 @@ def _special_prompt_block(uid=None) -> str:
     if not SPECIAL_PROMPT_ENABLED or not SPECIAL_PROMPT:
         return ""
     name = (SPECIAL_PROMPT_NAME or "老爹").strip()
-    qq_hint = f"他的QQ号是 {uid}，要私聊或@他直接用这个号，" if uid else ""
-    head = (f"（这一轮里有「{name}」在说话。{qq_hint}不用查、不用调工具确认身份。"
-            f"下面这段是单独给他的一套相处方式；群里其他群友照平时那样对待就好。）\n")
-    return ("\n\n【" + name + "的专属设定】\n"
+    _qq = str(uid) if uid else ""
+    title = (SPECIAL_PROMPT_TITLE or "{name}的专属设定").replace("{name}", name)
+    if SPECIAL_PROMPT_HEADER:
+        head = SPECIAL_PROMPT_HEADER.replace("{name}", name).replace("{qq}", _qq).strip()
+        if not head.endswith("\n"):
+            head += "\n"
+    else:
+        qq_hint = f"其QQ号是 {_qq}，要私聊或@TA直接用这个号，" if _qq else ""
+        head = (f"（这一轮里有「{name}」在说话。{qq_hint}不用查、不用调工具确认身份。"
+                f"下面这段是单独给这个人的一套相处方式；群里其他群友照平时那样对待就好。）\n")
+    return ("\n\n【" + title + "】\n"
             + head + str(SPECIAL_PROMPT).strip() + "\n")
 
 
@@ -7010,7 +7019,7 @@ def _load_config_file():
     global ONEBOT_WS, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_VISION_MODEL, BOCHA_API_KEY
     global MAX_CONTEXT_LEN, COOLDOWN, ALLOWED_GROUPS, ALLOWED_USERS
     global ENABLE_WEB_SEARCH, ENABLE_NOTIFY, SEARCH_RESULT_NUM, SYSTEM_PROMPT
-    global SPECIAL_PROMPT_ENABLED, SPECIAL_PROMPT, SPECIAL_PROMPT_USERS, SPECIAL_PROMPT_NAME
+    global SPECIAL_PROMPT_ENABLED, SPECIAL_PROMPT, SPECIAL_PROMPT_USERS, SPECIAL_PROMPT_NAME, SPECIAL_PROMPT_TITLE, SPECIAL_PROMPT_HEADER
     global DOWNLOAD_ROOT, _CONVERT_DIR, IMG_SUFFIX, ZIP_PASSWORD, MAX_SEND_MB, DEFAULT_CHAPTER
     global ENABLE_DOUYIN_API, DOUYIN_API_BASE, DOUYIN_API_KEY, DOUYIN_POLL_INTERVAL, DOUYIN_JOB_TIMEOUT, DOUYIN_MEDIA_DIR, MEDIA_MAX_MB
     global SEND_FILE_AS_CHAT_MSG, UPLOAD_CLEANUP, UPLOAD_CLEANUP_DELAY_SECONDS
@@ -7238,6 +7247,8 @@ def _load_config_file():
     SPECIAL_PROMPT = s("special_prompt", SPECIAL_PROMPT)
     SPECIAL_PROMPT_USERS = lst("special_prompt_users", SPECIAL_PROMPT_USERS)
     SPECIAL_PROMPT_NAME = (s("special_prompt_name", SPECIAL_PROMPT_NAME) or "老爹").strip()
+    SPECIAL_PROMPT_TITLE = s("special_prompt_title", SPECIAL_PROMPT_TITLE) or "{name}的专属设定"
+    SPECIAL_PROMPT_HEADER = s("special_prompt_header", SPECIAL_PROMPT_HEADER) or ""
     BOT_NAME = s("bot_name", BOT_NAME)
     DEFAULT_CHAPTER = i("default_chapter", DEFAULT_CHAPTER)
 

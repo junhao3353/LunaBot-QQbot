@@ -959,6 +959,35 @@
             <small class="text-muted">逻辑：群/私聊都没人和AI对话达到"静默时间"→随机延迟后AI挑最可能有人回的目标主动找话题（先自己想话题，实在没有才联网搜）→冷却后再来；对方说话或正常对话会立刻重置。</small>
           </div>
         </div></div>
+
+        <!-- 专属提示词 -->
+        <div class="card card-glow mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#fbbf24;">专属提示词（只对白名单里的人生效）</h3>
+          <p class="text-muted small mb-3">白名单里的人（群聊/私聊）说话时才会注入这段设定；其他人不受影响。合并窗口里只要有一个白名单就注入。</p>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_sp_enabled"><span class="pill-slider"></span></label>
+            <span class="feat-label">启用专属提示词</span>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label">称呼</span>
+            <div class="feat-param"><input type="text" class="form-control" id="feat_sp_name" placeholder="老爹" style="width:200px;"></div>
+            <span class="feat-label">白名单QQ（逗号/空格分隔）</span>
+            <div class="feat-param"><input type="text" class="form-control" id="feat_sp_users" placeholder="123456789, 987654321" style="width:260px;"></div>
+          </div>
+          <div class="feat-row">
+            <span class="feat-label">小标题</span>
+            <div class="feat-param"><input type="text" class="form-control" id="feat_sp_title" placeholder="{name}的专属设定" style="width:260px;"></div>
+          </div>
+          <div class="feat-row" style="align-items:flex-start;">
+            <span class="feat-label">开场白（支持 {name} 和 {qq}，留空=默认）</span>
+          </div>
+          <div class="mb-3"><textarea class="form-control" id="feat_sp_header" rows="2" placeholder="留空则用默认：这一轮里有「{name}」在说话…"></textarea></div>
+          <div class="feat-row" style="align-items:flex-start;">
+            <span class="feat-label">专属提示词正文</span>
+          </div>
+          <div><textarea class="form-control" id="feat_sp_prompt" rows="8" placeholder="只对这个人生效的相处方式，比如：温顺模式、语气、称呼、雷点…"></textarea></div>
+        </div></div>
+
       </div>
 
       <div id="page-logs" class="page-content" style="display:none;overflow:hidden;">
@@ -1349,6 +1378,12 @@
         sw('feat_memory_on', c.memory_enabled);
         sw('feat_bank_on', c.memory_bank_enabled);
         setv('feat_bank_max', c.memory_bank_max_entries ?? 20000);
+        sw('feat_sp_enabled', c.special_prompt_enabled);
+        setv('feat_sp_name', c.special_prompt_name || '老爹');
+        setv('feat_sp_users', (c.special_prompt_users || []).join(', '));
+        setv('feat_sp_title', c.special_prompt_title || '{name}的专属设定');
+        setv('feat_sp_header', c.special_prompt_header || '');
+        setv('feat_sp_prompt', c.special_prompt || '');
         setv('feat_bank_topk', c.memory_search_topk ?? 8);
         sw('feat_mem_saver', c.memory_saver_mode);
         setv('feat_mem_max', c.memory_profile_max_chars ?? 3000);
@@ -1406,6 +1441,12 @@
         memory_bank_enabled: document.getElementById('feat_bank_on').checked,
         memory_bank_max_entries: _pi('feat_bank_max', 20000),
         memory_search_topk: _pi('feat_bank_topk', 8),
+        special_prompt_enabled: document.getElementById('feat_sp_enabled').checked,
+        special_prompt_name: document.getElementById('feat_sp_name').value,
+        special_prompt_users: document.getElementById('feat_sp_users').value,
+        special_prompt_title: document.getElementById('feat_sp_title').value,
+        special_prompt_header: document.getElementById('feat_sp_header').value,
+        special_prompt: document.getElementById('feat_sp_prompt').value,
         memory_saver_mode: document.getElementById('feat_mem_saver').checked,
         memory_profile_max_chars: _pi('feat_mem_max', 3000),
         memory_compress_threshold: _pi('feat_mem_threshold', 2000),
