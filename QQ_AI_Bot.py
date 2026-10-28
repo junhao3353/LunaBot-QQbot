@@ -78,12 +78,14 @@ def _post_json(url, headers, payload, timeout, what="接口"):
     # 统计DeepSeek API调用次数和token消耗（供WebUI仪表盘展示）
     if "api.deepseek.com" in url:
         _record_api_usage(res_json)
+        _log_token_usage(what, res_json)
     return res_json
 
 
 # ===================== API调用统计（纯计数，供WebUI仪表盘） =====================
 _stats_lock = threading.Lock()
-_stats_cache = {"deepseek_calls": 0, "vision_calls": 0, "volcengine_calls": 0, "websearch_calls": 0}
+_stats_cache = {"deepseek_calls": 0, "vision_calls": 0, "volcengine_calls": 0, "websearch_calls": 0,
+                "prompt_tokens": 0, "completion_tokens": 0, "cache_hit_tokens": 0}
 _STATS_PATH = os.environ.get("QQ_STATS_FILE", "/data/stats.json")
 _STATS_FLUSH_COUNTER = {"n": 0}
 _STATS_FLUSH_EVERY = 10  # 每N次调用落盘一次
@@ -140,6 +142,28 @@ def _record_api_usage(res_json):
     """DeepSeek API调用后触发（兼容旧调用点，等价于_increment_stat("deepseek_calls")）"""
     if isinstance(res_json, dict) and (res_json.get("usage") or res_json.get("choices")):
         _increment_stat("deepseek_calls")
+
+
+def _log_token_usage(what, res_json):
+    """打印并累计单次调用的 token 用量：prompt / completion / 缓存命中"""
+    try:
+        u = (res_json or {}).get("usage") or {}
+        if not isinstance(u, dict):
+            return
+        p = int(u.get("prompt_tokens") or 0)
+        c = int(u.get("completion_tokens") or 0)
+        hit = int(u.get("prompt_cache_hit_tokens") or 0)
+        miss = int(u.get("prompt_cache_miss_tokens") or 0)
+        if not (p or c):
+            return
+        with _stats_lock:
+            _stats_cache["prompt_tokens"] = _stats_cache.get("prompt_tokens", 0) + p
+            _stats_cache["completion_tokens"] = _stats_cache.get("completion_tokens", 0) + c
+            _stats_cache["cache_hit_tokens"] = _stats_cache.get("cache_hit_tokens", 0) + hit
+        print(f"📊 [{what}] prompt={p} completion={c} cache_hit={hit}"
+              + (f" miss={miss}" if miss else ""))
+    except Exception:
+        pass
 
 
 # 启动时加载已有统计数据
@@ -858,9 +882,13 @@ class MemoryV2:
             lines.append(f"QQ {qq} 昵称 {u.get('nickname') or '无'}" + ("；" + "；".join(gs) if gs else ""))
         return "\n".join(lines)
 
-    def render_temp(self):
+    def render_temp(self, exclude_key=None):
+        """渲染上下文/说说/摘要/备忘。exclude_key=当前会话的 key（g_群号 / p_QQ），
+        当前会话的历史已经通过 messages 传给模型了，这里排除掉避免重复计费。"""
         parts = []
         for key, msgs in self.temp.get("contexts", {}).items():
+            if exclude_key and key == exclude_key:
+                continue
             if not isinstance(msgs, list) or not msgs:
                 continue
             label = f"群聊 {key[2:]}" if key.startswith("g_") else f"私聊 {key[2:]}"
@@ -1532,7 +1560,11 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
     ui = _mem.render_userinfo()
     if ui:
         parts.append("【用户信息（自动拉取）】\n" + ui)
-    tmp = _mem.render_temp()
+    try:
+        _cur_key = (f"g_{int(obj_id)}" if is_group else f"p_{int(obj_id)}") if obj_id else None
+    except Exception:
+        _cur_key = None
+    tmp = _mem.render_temp(exclude_key=_cur_key)
     if tmp:
         parts.append("【临时记忆·上下文/说说/备忘】\n" + tmp)
     text = "\n\n".join(parts)
@@ -2512,6 +2544,8 @@ def recognize_image(image_url: str, prompt: str = "请详细描述这张图片�
         }
         resp = requests.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=data, timeout=60)
         res_json = resp.json()
+        _record_api_usage(res_json)
+        _log_token_usage("视觉识别", res_json)
         if "choices" in res_json:
             return res_json["choices"][0]["message"]["content"].strip()
         return f"图片识别失败：{res_json.get('error', '未知错误')}"
@@ -2539,6 +2573,8 @@ def recognize_image_data_url(data_url, prompt="详细、准确地描述这张图
         data = {"model": DEEPSEEK_VISION_MODEL, "messages": messages, "temperature": 0.3}
         resp = requests.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=data, timeout=60)
         res_json = resp.json()
+        _record_api_usage(res_json)
+        _log_token_usage("视觉识别(data_url)", res_json)
         if "choices" in res_json:
             return res_json["choices"][0]["message"]["content"].strip()
         return f"图片识别失败：{res_json.get('error', '未知错误')}"
@@ -5083,7 +5119,17 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         "Content-Type": "application/json"
     }
     # 系统提示词放在最前面
-    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "") + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
+    # system 拆两条：前面是稳定内容（每轮不变，能命中 DeepSeek 前缀缓存 ¥0.2/M），
+    # 后面单独放记忆块（每轮变化，但只让它自己未命中，不拖累前缀）
+    _sys_stable = (build_system_prompt()
+                   + (_special_prompt_block(user_id) if special else "")
+                   + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
+                   + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
+                   + _tts_sound_tag_hint())
+    _sys_mem = _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    messages = [{"role": "system", "content": _sys_stable}]
+    if _sys_mem:
+        messages.append({"role": "system", "content": _sys_mem})
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
@@ -5655,7 +5701,17 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
-    messages = [{"role": "system", "content": build_system_prompt() + (_special_prompt_block(user_id) if special else "") + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "") + _tts_sound_tag_hint() + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)}]
+    # system 拆两条：前面是稳定内容（每轮不变，能命中 DeepSeek 前缀缓存 ¥0.2/M），
+    # 后面单独放记忆块（每轮变化，但只让它自己未命中，不拖累前缀）
+    _sys_stable = (build_system_prompt()
+                   + (_special_prompt_block(user_id) if special else "")
+                   + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
+                   + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
+                   + _tts_sound_tag_hint())
+    _sys_mem = _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    messages = [{"role": "system", "content": _sys_stable}]
+    if _sys_mem:
+        messages.append({"role": "system", "content": _sys_mem})
     # 历史只保留纯文本（图片base64太大不入历史）
     messages.extend(history)
     # 当前用户消息：文字 + 多张图片（一次性投完，不逐张识别）
