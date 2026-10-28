@@ -2881,7 +2881,10 @@ def _is_pure_image_silent(image_urls, plain_text: str, is_group: bool, at_flag: 
         return False
     if plain_text:
         return False
-    return not (is_group and at_flag)
+    # 私聊：发图就是要你看，直接当一条消息处理（不再等用户补文字）
+    if not is_group:
+        return False
+    return not at_flag
 
 
 # ===================== 群聊旁听缓存：没@机器人的消息也记下来当上下文 =====================
@@ -6822,20 +6825,21 @@ async def main():
                         user_text = extract_user_text(cq_msg, self_id)
                     if _file_note:
                         user_text = (user_text + '\n' + _file_note).strip()
-                    # 私聊的 [无文字] 占位符：纯文字空消息才丢弃；
-                    # 纯图片/视频/语音要当成一条消息继续走合并，否则得再补一句文字才会触发回复
-                    if not is_group and user_text.strip() in ("[无文字]", "无文字"):
-                        _has_img = "[CQ:image" in cq_msg
-                        _has_vid = ("[CQ:video" in cq_msg) or ("[CQ:file" in cq_msg)
-                        _has_rec = "[CQ:record" in cq_msg
-                        if _has_img:
-                            user_text = "（发来一张图片）"
-                        elif _has_vid:
-                            user_text = "（发来一段视频）"
-                        elif _has_rec:
-                            user_text = "（发来一条语音）"
-                        else:
-                            continue
+                    # 私聊：正文为空（或只有 [无文字]/CQ码）时按媒体类型补一句占位，
+                    # 这样纯图片/视频/语音也能直接触发回复，不用再补文字
+                    if not is_group:
+                        _clean = re.sub(r"\[CQ:[^\]]*\]", "", user_text).strip()
+                        if _clean in ("[无文字]", "无文字"):
+                            _clean = ""
+                        if not _clean:
+                            if image_urls or ("[CQ:image" in cq_msg):
+                                user_text = "（发来一张图片）"
+                            elif video_urls or ("[CQ:video" in cq_msg) or ("[CQ:file" in cq_msg):
+                                user_text = "（发来一段视频）"
+                            elif record_items or ("[CQ:record" in cq_msg):
+                                user_text = "（发来一条语音）"
+                            else:
+                                continue
 
                 # 控制器指令过滤：只有控制器白名单用户发的指令AI才跳过，非白名单正常回复（避免其他人发"重启服务"没人理）
                 if (CONTROLLER_ALLOWED_USERS and user_id in CONTROLLER_ALLOWED_USERS
