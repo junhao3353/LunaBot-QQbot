@@ -6285,12 +6285,16 @@ async def _merge_worker(ws, chat_id, is_group):
                 if ENABLE_INPUT_STATUS and st.get("typing") and (now - float(st.get("ts") or 0) < 60):
                     await asyncio.sleep(0.4)
                     continue
-                # 2) 刚停止输入 → 停止满 grace 秒就立刻处理（不用等满合并窗口）
-                if ENABLE_INPUT_STATUS and st.get("stop_ts") and (now - float(st["stop_ts"]) < 120):
-                    if now - float(st["stop_ts"]) >= INPUT_STATUS_GRACE:
-                        break
-                    await asyncio.sleep(0.3)
-                    continue
+                # 2) 刚停止输入 → 停止满 grace 秒就处理（不用等满合并窗口）
+                #    只认"这条消息之后"的停止事件：上一轮遗留的 stop_ts 不能拿来给新消息用，
+                #    否则会出现"新消息一来就秒回"。
+                if ENABLE_INPUT_STATUS and st.get("stop_ts"):
+                    _stop = float(st["stop_ts"])
+                    if _stop >= last - 2 and (now - _stop) < 120:
+                        if now - _stop >= INPUT_STATUS_GRACE and (now - last) >= 2:
+                            break
+                        await asyncio.sleep(0.3)
+                        continue
                 # 3) 兜底：原来的合并窗口
                 if now - last >= MERGE_WAIT_SECONDS:
                     break
