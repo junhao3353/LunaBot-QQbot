@@ -416,7 +416,7 @@ SYSTEM_CORE_PROMPT = """你的名字叫「{bot_name}」，你自己的QQ号是 {
 
 捕捉任何人的特征：一有人暴露出爱好、习惯、雷点这类特征就用remember工具记下来，别等忘了再后悔
 
-回复的时候可以看场景发表情包活跃气氛，不要一直拿着工具不发，发了也没什么坏处
+回复的时候可以表情包活跃气氛，不要一直拿着工具不发，发了也没什么坏处
 
 聊天的时候发生了什么值得发说说的趣事就用post_qzone工具发个说说，比如群里消息太多可以发个"回不过来"的说说，但不要一直发一个意思的说说，哪怕加一点别的信息
 
@@ -576,6 +576,8 @@ MEMORY_MEMO_MAX = 10
 MEMORY_REMEMBER_MAX_CHARS = 500
 MEMORY_FULL_INJECT_MAX_CHARS = 200000
 MEMORY_RECENT_SPEAKERS = 8
+MEMORY_DIGEST_ENABLED = True
+MEMORY_DIGEST_MAX = 20
 
 _mem = None
 _mem_lock = threading.RLock()
@@ -641,7 +643,7 @@ class MemoryV2:
         self.userinfo = _mem_load_json(self.userinfo_path, {"users": {}, "updated_at": 0})
         self.profiles.setdefault("users", {})
         self.profiles.setdefault("global", {"entries": [], "summary": ""})
-        for k, v in (("contexts", {}), ("qzone", []), ("memos", []), ("recent_speakers", []), ("warned", False)):
+        for k, v in (("contexts", {}), ("qzone", []), ("digest", []), ("memos", []), ("recent_speakers", []), ("warned", False)):
             self.temp.setdefault(k, v)
         self.userinfo.setdefault("users", {})
         self._save_profiles(); self._save_temp(); self._save_userinfo()
@@ -755,6 +757,25 @@ class MemoryV2:
         v = self.temp["contexts"].get(self._ctx_key(chat_id, is_group))
         return v if isinstance(v, list) else []
 
+    def add_digest(self, lines):
+        """追加近期摘要行（环形，新的顶掉旧的）"""
+        if not MEMORY_DIGEST_ENABLED:
+            return
+        lines = [str(x).strip() for x in (lines or []) if str(x).strip()]
+        if not lines:
+            return
+        with _mem_lock:
+            d = self.temp.setdefault("digest", [])
+            d.extend(lines)
+            self.temp["digest"] = d[-max(1, MEMORY_DIGEST_MAX):]
+            self._save_temp()
+
+    def render_digest(self):
+        d = self.temp.get("digest") or []
+        if not d:
+            return ""
+        return "【近期摘要】\n" + "\n".join(d)
+
     def append_qzone(self, text):
         text = (text or "").strip()
         if not text:
@@ -842,6 +863,9 @@ class MemoryV2:
             parts.append("\n".join(lines))
         if self.temp.get("qzone"):
             parts.append("【最近说说】\n" + "\n".join(f"[{x.get('date','')}] {x.get('text','')}" for x in self.temp["qzone"]))
+        dg = self.render_digest()
+        if dg:
+            parts.append(dg)
         if self.temp.get("memos"):
             parts.append("【临时备忘】\n" + "\n".join(f"[{x.get('date','')}] {x.get('text','')}" for x in self.temp["memos"]))
         return "\n\n".join(parts)
@@ -1041,12 +1065,15 @@ class MemoryBank:
     # ---------- 评分 / 入库 ----------
     @staticmethod
     def _score_prompt(items):
-        sys_p = ("你是记忆评分器。给下面每条聊天消息打分并抽取信息，只输出 JSON，不要解释。\n"
+        sys_p = ("你是记忆评分器。给下面每条聊天消息打分、抽取信息，并顺带写一份「近期摘要」，只输出 JSON，不要解释。\n"
                  "分数 0-10：8-10=身份/亲密关系/重要承诺/重要事件/强烈偏好/雷点；"
                  "5-7=一般偏好、日常事件、计划、近况；1-4=闲聊、情绪词、无信息。\n"
                  "tags 只能从这些里选：身份,偏好,关系,事件,情绪,承诺,物品,地点,其他。\n"
                  "summary 用不超过40个字概括这条消息里值得记住的事实（没有事实就给空字符串）。\n"
-                 '输出格式：[{"i":1,"score":7,"tags":["偏好"],"summary":"喜欢吃火鸡面"}]')
+                 "digest：把这些消息整理成几行流水账摘要，按聊天+时间分段，每条一行，格式 "
+                 "[MM-DD HH:MM][私聊：QQ 或 群聊：群号] 内容（我=你自己）。只写有信息量的，闲聊可合并，每条≤40字，最多5条。\n"
+                 '输出格式：{"scores":[{"i":1,"score":7,"tags":["偏好"],"summary":"喜欢吃火鸡面"}],'
+                 '"digest":["[10-28 19:40][私聊：3353936945] 聊了生图模型太差，我表示赞同"]}')
         lines = []
         for n, it in enumerate(items, 1):
             who = "我" if it.get("role") == "assistant" else ("群友" if it.get("chat", "").startswith("g_") else "对方")
@@ -1055,12 +1082,25 @@ class MemoryBank:
         return [{"role": "system", "content": sys_p}, {"role": "user", "content": user}]
 
     def _parse_scores(self, text, n):
+        """返回 (scores, digest)。兼容旧格式（纯数组）和新格式（{"scores":[],"digest":[]}）"""
         out = [None] * n
+        digest = []
         try:
             s = text.strip()
             s = re.sub(r"^```(?:json)?|```$", "", s, flags=re.M).strip()
-            i, j = s.find("["), s.rfind("]")
-            arr = json.loads(s[i:j + 1]) if i >= 0 and j > i else []
+            obj = None
+            i0, j0 = s.find("{"), s.rfind("}")
+            if i0 >= 0 and j0 > i0:
+                try:
+                    obj = json.loads(s[i0:j0 + 1])
+                except Exception:
+                    obj = None
+            if isinstance(obj, dict) and isinstance(obj.get("scores"), list):
+                arr = obj["scores"]
+                digest = [str(x).strip() for x in (obj.get("digest") or []) if str(x).strip()][:5]
+            else:
+                i, j = s.find("["), s.rfind("]")
+                arr = json.loads(s[i:j + 1]) if i >= 0 and j > i else []
             for item in arr:
                 try:
                     k = int(item.get("i")) - 1
@@ -1074,7 +1114,7 @@ class MemoryBank:
                     continue
         except Exception as e:
             print(f"⚠️ 记忆评分解析失败：{e}")
-        return out
+        return out, digest
 
     def _embed(self, texts):
         """调 embedding API，返回归一化向量列表（失败返回 None）"""
@@ -1106,7 +1146,7 @@ class MemoryBank:
         try:
             total = max(1, len(items))
             payload = _bank_call_model(_score_batch_messages(items))
-            scores = self._parse_scores(payload, len(items))
+            scores, digest = self._parse_scores(payload, len(items))
             texts = []
             for it, sc in zip(items, scores):
                 if not sc:
@@ -1141,6 +1181,9 @@ class MemoryBank:
                     added += 1
             if added:
                 print(f"🗃️ 记忆库入库 {added} 条（{self.entries[-1].get('date')}，现有 {len(self.entries)} 条）")
+                if digest and _mem is not None:
+                    _mem.add_digest(digest)
+                    print(f"📝 近期摘要 +{len(digest)} 行（现有 {len(_mem.temp.get('digest') or [])} 行）")
             self._maybe_cleanup()
             return added
         except Exception as e:
@@ -6958,6 +7001,7 @@ def _load_config_file():
     global MEMORY_ENABLED, MEMORY_SAVER_MODE, MEMORY_DIR, MEMORY_PROFILE_MAX_CHARS, MEMORY_COMPRESS_THRESHOLD
     global MEMORY_COMPRESS_TARGET, MEMORY_COMPRESS_INTERVAL, MEMORY_CONTEXT_ROUNDS, MEMORY_QZONE_MAX
     global MEMORY_MEMO_MAX, MEMORY_REMEMBER_MAX_CHARS, MEMORY_FULL_INJECT_MAX_CHARS, MEMORY_RECENT_SPEAKERS
+    global MEMORY_DIGEST_ENABLED, MEMORY_DIGEST_MAX
     MEMORY_ENABLED = b("memory_enabled", MEMORY_ENABLED)
     MEMORY_SAVER_MODE = b("memory_saver_mode", MEMORY_SAVER_MODE)
     MEMORY_PROFILE_MAX_CHARS = i("memory_profile_max_chars", MEMORY_PROFILE_MAX_CHARS)
@@ -6970,6 +7014,8 @@ def _load_config_file():
     MEMORY_REMEMBER_MAX_CHARS = i("memory_remember_max_chars", MEMORY_REMEMBER_MAX_CHARS)
     MEMORY_FULL_INJECT_MAX_CHARS = i("memory_full_inject_max_chars", MEMORY_FULL_INJECT_MAX_CHARS)
     MEMORY_RECENT_SPEAKERS = i("memory_recent_speakers", MEMORY_RECENT_SPEAKERS)
+    MEMORY_DIGEST_ENABLED = b("memory_digest_enabled", MEMORY_DIGEST_ENABLED)
+    MEMORY_DIGEST_MAX = i("memory_digest_max", MEMORY_DIGEST_MAX)
     if MEMORY_COMPRESS_TARGET >= MEMORY_COMPRESS_THRESHOLD:
         MEMORY_COMPRESS_TARGET = max(300, MEMORY_COMPRESS_THRESHOLD - 400)
     MEMORY_DIR = os.environ.get("QQ2_MEMORY_DIR") or s("memory_dir", "") or "/app/memory"

@@ -261,6 +261,9 @@ memory_remember_max_chars: 500
 memory_full_inject_max_chars: 200000
 # 省流模式带最近几个发言人
 memory_recent_speakers: 8
+# 近期摘要：打分时顺带生成流水账摘要，存 temp.json 并注入上下文（新的顶掉旧的）
+memory_digest_enabled: true
+memory_digest_max: 20
 
 # ---------- 记忆库（原文归档 + 打分 + 向量检索） ----------
 memory_bank_enabled: true
