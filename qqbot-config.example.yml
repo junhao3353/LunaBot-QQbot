@@ -94,10 +94,10 @@ volc_token: ""
 volc_cluster: "volcano_tts"
 volc_voice: "zh_female_cancan_mars_bigtts"  # 灿灿女声，可换其他音色
 # Breeze Blue TTS（https://docs.breezeblue.ai）
-breeze_api_key: \"\"
-breeze_voice: \"\"
-breeze_model: \"breeze-tts-2\"
-breeze_instructions: \"\"
+breeze_api_key: ""
+breeze_voice: ""
+breeze_model: "breeze-tts-2"
+breeze_instructions: ""
 
 # ---------- 消息合并（防抖：连续消息合并成一次AI回复） ----------
 enable_message_merge: true

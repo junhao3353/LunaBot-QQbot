@@ -353,3 +353,8 @@ embedding_dim: 1024
   - 配置：breeze_api_key / breeze_voice / breeze_model（默认 breeze-tts-2）/ breeze_instructions（语气指令）
   - WebUI 模型管理：Edge TTS 换成 Breeze Blue（API Key、音色 ID、模型、语气指令），失败自动降级 edge-tts
   - 默认 tts_engine 改为 breeze；未填 Key/音色时仍走 edge 兜底
+
+- 补丁（2026-10-29 之九）：
+  - 修复 Breeze 配置被写成字面 `\"` 导致 API Key 误判"已设置"、音色/模型显示 `\"` 的问题
+  - WebUI 去掉 Breeze 字段的（申请）/（音色列表）提示
+  - MiniMax 语音模型从下拉框改成输入框
