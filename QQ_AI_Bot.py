@@ -320,7 +320,7 @@ FILE_READ_MAX_CHARS = 4000      # 单次读取文件最大字符数
 _file_cache = {}                    # 文本文件内容缓存：key=chat_id，value={"content","name","ts"}，过期即丢（走图片缓存同款逻辑）
 _FILE_CACHE_TTL = 60                # 文件内容缓存60秒（配置文件 file_read_ttl 覆盖），过期丢弃不注入（配置文件 file_read_max_chars 覆盖）
 TTS_VOICE = "zh-CN-XiaoyiNeural"  # 音色：晓伊女声（配置文件 tts_voice 覆盖）
-TTS_ENGINE = "edge"            # TTS引擎：edge=微软edge-tts（免费），volc=火山引擎（豆包音色）
+TTS_ENGINE = "breeze"          # TTS引擎：breeze=Breeze Blue（音色好/有免费额度），volc=火山引擎，minimax=MiniMax
 # 火山引擎TTS配置（TTS_ENGINE=volc时生效）
 VOLC_API_KEY = ""            # 火山引擎API Key（新版大模型用）
 # 旧版参数（已废弃，新版用API Key）
@@ -329,6 +329,12 @@ VOLC_VOICE = "zh_female_vv_uranus_bigtts"  # 音色ID
 # MiniMax TTS配置（TTS_ENGINE=minimax时生效）
 MINIMAX_TTS_MODEL = "speech-2.8-hd"       # 语音模型: speech-2.8-hd / speech-2.8-turbo / speech-2.6-hd等
 MINIMAX_TTS_VOICE = "Chinese (Mandarin)_Crisp_Girl"  # 音色ID
+# Breeze Blue TTS 配置（TTS_ENGINE=breeze 时生效）https://docs.breezeblue.ai
+BREEZE_API_KEY = ""            # brz_ 开头的 API Key
+BREEZE_VOICE = ""              # 音色ID，如 voc_xeh3w54cqvnp（GET /v1/voices 查）
+BREEZE_TTS_MODEL = "breeze-tts-2"   # 可留空由服务端自动选
+BREEZE_INSTRUCTIONS = ""       # 可选的语气指令，如"语气轻软、带点撒娇"
+BREEZE_BASE = "https://api.breeze.blue"
 MINIMAX_TTS_SPEED = 1.0                   # 语速 0.5~2.0
 MINIMAX_TTS_VOL = 1.0                     # 音量 0~10
 MINIMAX_TTS_PITCH = 0                     # 音调 -12~12
@@ -3353,7 +3359,8 @@ async def send_private_msg(websocket, user_id: int, msg: str, no_delay: bool = F
 
 def _tts_sound_tag_hint() -> str:
     """根据当前TTS引擎返回语气词提示（注入system prompt）。不支持的引擎返回空串。"""
-    if TTS_ENGINE == "minimax" and MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8"):
+    if (TTS_ENGINE in ("minimax", "breeze")
+            and (TTS_ENGINE != "minimax" or (MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8")))):
         return """
 【语音语气词】用send_voice工具发语音时，可以在文本里加语气词标签让语音更自然：(laughs)大笑、(chuckle)轻笑、(sighs)叹气、(coughs)咳嗽、(gasps)惊讶吸气、(breath)呼吸声、(um)犹豫。只在合适的情绪场景用，不要每句都加。"""
     return ""
@@ -3375,7 +3382,15 @@ async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> b
         tmp = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex[:8]}.mp3")
         # 根据引擎决定是否过滤语气词标签（minimax保留，其他过滤防止读成文字）
         _tts_text = text if (TTS_ENGINE == "minimax" and MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8")) else _strip_tts_tags(text)
-        if TTS_ENGINE == "volc" and VOLC_API_KEY:
+        if TTS_ENGINE == "breeze" and BREEZE_API_KEY and BREEZE_VOICE:
+            # Breeze Blue TTS（支持 (sighs) 之类的语气词标签，保留原文本）
+            ok = await asyncio.to_thread(_breeze_tts_synthesize, _tts_text, tmp)
+            if not ok:
+                print("⚠️ Breeze TTS失败，降级edge-tts")
+                import edge_tts
+                communicate = edge_tts.Communicate(_strip_tts_tags(text), TTS_VOICE)
+                await communicate.save(tmp)
+        elif TTS_ENGINE == "volc" and VOLC_API_KEY:
             # 火山引擎大模型TTS
             ok = await asyncio.to_thread(_volc_tts_synthesize, _tts_text, tmp)
             if not ok:
@@ -3558,6 +3573,34 @@ def split_reply_to_parts(text: str) -> list:
     if SPLIT_MAX_PARTS > 0 and len(fine) > SPLIT_MAX_PARTS:
         return [t]
     return [p for p in fine if p.strip()]
+
+
+def _breeze_tts_synthesize(text: str, out_path: str) -> bool:
+    """Breeze Blue TTS：POST /v1/text-to-speech/{voice_id} 返回 mp3 二进制。"""
+    if not BREEZE_API_KEY or not BREEZE_VOICE:
+        print("⚠️ Breeze TTS 未配置 API Key 或音色 ID")
+        return False
+    try:
+        payload = {"text": (text or "")[:900]}
+        if BREEZE_TTS_MODEL:
+            payload["model_id"] = BREEZE_TTS_MODEL
+        if BREEZE_INSTRUCTIONS:
+            payload["instructions"] = BREEZE_INSTRUCTIONS
+        r = requests.post(
+            f"{BREEZE_BASE}/v1/text-to-speech/{BREEZE_VOICE}",
+            headers={"xi-api-key": BREEZE_API_KEY, "Content-Type": "application/json"},
+            params={"output_format": "mp3", "delivery": "sync"},
+            json=payload, timeout=120,
+        )
+        if r.status_code != 200:
+            print(f"⚠️ Breeze TTS HTTP {r.status_code}：{(r.text or '')[:200]}")
+            return False
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+        return os.path.isfile(out_path) and os.path.getsize(out_path) > 1024
+    except Exception as e:
+        print(f"⚠️ Breeze TTS 异常：{e}")
+        return False
 
 
 def _volc_tts_synthesize(text: str, output_path: str) -> bool:
@@ -7337,6 +7380,11 @@ def _load_config_file():
     if _tts_voice:
         TTS_VOICE = _tts_voice
     # TTS引擎选择（edge/volc）+ 火山引擎配置
+    global BREEZE_API_KEY, BREEZE_VOICE, BREEZE_TTS_MODEL, BREEZE_INSTRUCTIONS
+    BREEZE_API_KEY = s("breeze_api_key", BREEZE_API_KEY) or BREEZE_API_KEY
+    BREEZE_VOICE = s("breeze_voice", BREEZE_VOICE) or BREEZE_VOICE
+    BREEZE_TTS_MODEL = s("breeze_model", BREEZE_TTS_MODEL) or BREEZE_TTS_MODEL
+    BREEZE_INSTRUCTIONS = s("breeze_instructions", BREEZE_INSTRUCTIONS) or ""
     _tts_engine = s("tts_engine", "")
     if _tts_engine:
         TTS_ENGINE = _tts_engine
@@ -7349,7 +7397,9 @@ def _load_config_file():
     MINIMAX_TTS_VOL = float(s("minimax_tts_vol", str(MINIMAX_TTS_VOL)))
     MINIMAX_TTS_PITCH = int(s("minimax_tts_pitch", str(MINIMAX_TTS_PITCH)))
     if ENABLE_TTS:
-        if TTS_ENGINE == "volc" and VOLC_API_KEY:
+        if TTS_ENGINE == "breeze" and BREEZE_API_KEY and BREEZE_VOICE:
+            print(f"🎙️ AI回复转语音已开启：Breeze Blue 音色={BREEZE_VOICE} 模型={BREEZE_TTS_MODEL}")
+        elif TTS_ENGINE == "volc" and VOLC_API_KEY:
             print(f"🎙️ AI回复转语音已开启：火山引擎 音色={VOLC_VOICE}")
         elif TTS_ENGINE == "minimax" and MINIMAX_API_KEY:
             print(f"🎙️ AI回复转语音已开启：MiniMax 模型={MINIMAX_TTS_MODEL} 音色={MINIMAX_TTS_VOICE}")

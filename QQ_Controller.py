@@ -476,6 +476,11 @@ def _get_model_config():
         "volc_api_key": "",  # 不回显
         "has_volc_api_key": _has_secret(cfg.get("volc_api_key")),
         "volc_voice": cfg.get("volc_voice", ""),
+        "breeze_api_key": "",  # 不回显
+        "has_breeze_api_key": _has_secret(cfg.get("breeze_api_key")),
+        "breeze_voice": cfg.get("breeze_voice", ""),
+        "breeze_model": cfg.get("breeze_model", "breeze-tts-2"),
+        "breeze_instructions": cfg.get("breeze_instructions", ""),
         "minimax_api_key": "",  # 不回显
         "has_minimax_api_key": _has_secret(cfg.get("minimax_api_key")),
         "embedding_api_key": "",  # 不回显（阿里百炼 / 千问）
@@ -582,12 +587,17 @@ def _save_model_config(data):
         if "enable_tts" in data: cfg["enable_tts"] = bool(data["enable_tts"]); changed = True
         if "tts_engine" in data:
             eng = str(data["tts_engine"])
-            cfg["tts_engine"] = eng if eng in ("volc", "edge", "minimax", "none") else "volc"
+            cfg["tts_engine"] = eng if eng in ("breeze", "volc", "edge", "minimax", "none") else "breeze"
             changed = True
         if "tts_voice" in data: cfg["tts_voice"] = str(data["tts_voice"]); changed = True
         if _apply_secret(cfg, "volc_api_key", data.get("volc_api_key")):
             changed = True
         if "volc_voice" in data: cfg["volc_voice"] = str(data["volc_voice"]); changed = True
+        if _apply_secret(cfg, "breeze_api_key", data.get("breeze_api_key")):
+            changed = True
+        if "breeze_voice" in data: cfg["breeze_voice"] = str(data["breeze_voice"]).strip(); changed = True
+        if "breeze_model" in data: cfg["breeze_model"] = str(data["breeze_model"]).strip() or "breeze-tts-2"; changed = True
+        if "breeze_instructions" in data: cfg["breeze_instructions"] = str(data["breeze_instructions"] or ""); changed = True
         if _apply_secret(cfg, "minimax_api_key", data.get("minimax_api_key")):
             changed = True
         if _apply_secret(cfg, "embedding_api_key", data.get("embedding_api_key")):

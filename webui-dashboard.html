@@ -711,8 +711,8 @@
                     <span>火山引擎</span>
                   </label>
                   <label class="model-radio">
-                    <input type="radio" name="model_tts_engine" id="model_tts_edge" value="edge">
-                    <span>Edge TTS</span>
+                    <input type="radio" name="model_tts_engine" id="model_tts_breeze" value="breeze">
+                    <span>Breeze Blue</span>
                   </label>
                   <label class="model-radio">
                     <input type="radio" name="model_tts_engine" id="model_tts_minimax" value="minimax">
@@ -726,8 +726,20 @@
               <input type="text" class="form-control" id="model_volc_voice" placeholder="ICL_uranus_zh_female_xxx_tob">
             </div>
             <div class="col-md-6">
-              <label class="form-label">Edge TTS 音色（备用）</label>
-              <input type="text" class="form-control" id="model_edge_voice" placeholder="zh-CN-XiaoyiNeural">
+              <label class="form-label">Breeze API Key（<a href="https://breezeblue.ai/app/developer/api-keys" target="_blank" rel="noopener">申请</a>）</label>
+              <input type="password" class="form-control" id="model_breeze_key" placeholder="brz_xxx">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Breeze 音色 ID（<a href="https://docs.breezeblue.ai/api-reference/voices/list-voices" target="_blank" rel="noopener">音色列表</a>）</label>
+              <input type="text" class="form-control" id="model_breeze_voice" placeholder="voc_xeh3w54cqvnp">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Breeze 模型</label>
+              <input type="text" class="form-control" id="model_breeze_model" placeholder="breeze-tts-2">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Breeze 语气指令（可选）</label>
+              <input type="text" class="form-control" id="model_breeze_instructions" placeholder="语气轻软、带点撒娇">
             </div>
             <div class="col-md-6">
               <label class="form-label">MiniMax 语音模型</label>
@@ -1314,7 +1326,11 @@
           document.getElementById('model_vision').value = c.deepseek_vision_model || '';
           document.getElementById('model_context').value = c.max_context_len || 8;
           document.getElementById('model_volc_voice').value = c.volc_voice || '';
-          document.getElementById('model_edge_voice').value = c.tts_voice || '';
+          document.getElementById('model_breeze_key').value = c.breeze_api_key || '';
+          setSecretHint('model_breeze_key', c.has_breeze_api_key);
+          document.getElementById('model_breeze_voice').value = c.breeze_voice || '';
+          document.getElementById('model_breeze_model').value = c.breeze_model || 'breeze-tts-2';
+          document.getElementById('model_breeze_instructions').value = c.breeze_instructions || '';
           document.getElementById('model_minimax_tts_model').value = c.minimax_tts_model || 'speech-2.8-hd';
           document.getElementById('model_minimax_tts_voice').value = c.minimax_tts_voice || '';
           document.getElementById('model_minimax_tts_speed').value = c.minimax_tts_speed || 1;
@@ -1323,7 +1339,7 @@
           // 单选按钮
           const effort = c.reasoning_effort || 'high';
           document.getElementById('model_effort_' + effort).checked = true;
-          const ttsEngine = c.tts_engine || 'volc';
+          const ttsEngine = c.tts_engine || 'breeze';
           document.getElementById('model_tts_' + ttsEngine).checked = true;
           document.getElementById('model_tts_enable').checked = !!c.enable_tts;
         }
@@ -1351,9 +1367,12 @@
         reasoning_effort: effortEl ? effortEl.value : 'high',
         max_context_len: parseInt(document.getElementById('model_context').value) || 8,
         enable_tts: document.getElementById('model_tts_enable').checked,
-        tts_engine: ttsEngineEl ? ttsEngineEl.value : 'volc',
+        tts_engine: ttsEngineEl ? ttsEngineEl.value : 'breeze',
         volc_voice: document.getElementById('model_volc_voice').value,
-        tts_voice: document.getElementById('model_edge_voice').value,
+        breeze_api_key: document.getElementById('model_breeze_key').value,
+        breeze_voice: document.getElementById('model_breeze_voice').value,
+        breeze_model: document.getElementById('model_breeze_model').value,
+        breeze_instructions: document.getElementById('model_breeze_instructions').value,
         minimax_tts_model: document.getElementById('model_minimax_tts_model').value,
         minimax_tts_voice: document.getElementById('model_minimax_tts_voice').value,
         minimax_tts_speed: parseFloat(document.getElementById('model_minimax_tts_speed').value) || 1,

@@ -347,3 +347,9 @@ embedding_dim: 1024
   - 明确"大约一半情况别找话题"：直接「在吗/想你了/好无聊陪陪我/不要理我吗」，一句想TA本身就是话题
   - 放宽原先"必须带具体内容"的限制，只保留"别每次都发有人吗/在干嘛这种空话"
   - 去掉"开口必须带由头"的矛盾说法
+
+- TTS 新增 Breeze Blue（2026-10-29 之八）：
+  - 新增引擎 breeze（https://docs.breezeblue.ai）：POST /v1/text-to-speech/{voice_id}，xi-api-key 鉴权，返回 mp3
+  - 配置：breeze_api_key / breeze_voice / breeze_model（默认 breeze-tts-2）/ breeze_instructions（语气指令）
+  - WebUI 模型管理：Edge TTS 换成 Breeze Blue（API Key、音色 ID、模型、语气指令），失败自动降级 edge-tts
+  - 默认 tts_engine 改为 breeze；未填 Key/音色时仍走 edge 兜底
