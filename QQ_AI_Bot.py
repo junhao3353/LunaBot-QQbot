@@ -1470,10 +1470,7 @@ def _bank_tool_defs():
         "type": "function",
         "function": {
             "name": "search_memory",
-            "description": ("搜索记忆库：按语义找以前聊过的事/说过的话（原文片段+前后文）。"
-                            "当群友提到「上次/之前/以前/记得/我说过/那个」、问你不确定的旧事、"
-                            "或你想接话但不确定当时语境时，先调用它查一下再回。"
-                            "query 用一句人话描述要找什么（比如「用户吃了什么」「上次说的面」），不用拼关键词。"),
+            "description": "按语义搜记忆库(原文+上下文)。提到'上次/之前/记得'、问旧事、不确定语境时先查。query用一句人话描述。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1531,9 +1528,13 @@ def _mem_scope(is_group, obj_id):
     return f"群聊{obj_id}" if is_group else "私聊"
 
 
-def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
+def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
+    """返回 (静态部分, 动态部分)。
+    静态=人物档案/全局备忘/用户信息（很少变 → 放在前面吃前缀缓存）；
+    动态=上下文/说说/摘要/备忘（每轮或几小时变一次 → 放后面，变了不影响前面的缓存）。"""
     if not MEMORY_ENABLED or _mem is None:
-        return ""
+        return "", ""
+    static_parts = []
     parts = []
     if MEMORY_SAVER_MODE:
         keys = set()
@@ -1554,17 +1555,17 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
             except Exception:
                 pass
         prof = _mem.render_profiles(key_qqs=sorted(keys), per_user_limit=500)
-        parts.append("【长期记忆·人物档案（省流模式：只带主要人物，完整档案可调用 search_memory 搜索）】\n" + (prof or "（暂无）"))
+        static_parts.append("【长期记忆·人物档案（省流模式：只带主要人物，完整档案可调用 search_memory 搜索）】\n" + (prof or "（暂无）"))
     else:
         prof = _mem.render_profiles()
         if prof:
-            parts.append("【长期记忆·人物档案】\n" + prof)
+            static_parts.append("【长期记忆·人物档案】\n" + prof)
     gl = _mem.render_global()
     if gl:
-        parts.append("【长期记忆·全局备忘】\n" + gl)
+        static_parts.append("【长期记忆·全局备忘】\n" + gl)
     ui = _mem.render_userinfo()
     if ui:
-        parts.append("【用户信息（自动拉取）】\n" + ui)
+        static_parts.append("【用户信息（自动拉取）】\n" + ui)
     try:
         _cur_key = (f"g_{int(obj_id)}" if is_group else f"p_{int(obj_id)}") if obj_id else None
     except Exception:
@@ -1572,6 +1573,7 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
     tmp = _mem.render_temp(exclude_key=_cur_key, other_max_msgs=MEMORY_OTHER_CONTEXT_MSGS)
     if tmp:
         parts.append("【临时记忆·上下文/说说/备忘】\n" + tmp)
+    static_text = "\n\n".join(static_parts)
     text = "\n\n".join(parts)
     if text and not MEMORY_SAVER_MODE:
         total = len(text)
@@ -1580,7 +1582,14 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
             _mem.temp["warned"] = True
             _mem._save_temp()
             print(f"⚠️ 记忆全量注入 {total} 字（超过 {MEMORY_FULL_INJECT_MAX_CHARS}），已提醒一次开省流")
-    return ("\n\n" + text) if text else ""
+    return ((("\n\n" + static_text) if static_text else ""),
+            (("\n\n" + text) if text else ""))
+
+
+def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
+    """兼容旧调用：静态+动态拼成一整段"""
+    _st, _dy = _mem_prompt_parts(user_id, is_group, obj_id, cq_msg, raw_msg)
+    return _st + _dy
 
 
 # ---------- 工具 ----------
@@ -1589,9 +1598,7 @@ def _memory_tool_defs_v2():
         "type": "function",
         "function": {
             "name": "remember",
-            "description": ("记记忆：把值得长期记住的事写进记忆。只有你自己判断有价值才记（比如「Junhao 喜欢玩我的世界但很菜」），"
-                            "不要记闲聊废话、不要记别人让你记的东西。qq 不填或填 0 = 记到全局备忘。"
-                            "key 可选：同一主题（如「工作」「生日」）传同样的 key 会覆盖旧记录，适合更新而不是堆叠。"),
+            "description": "记长期记忆:只记有长期价值的(偏好/身份/重要事件/承诺),闲聊不记。qq不填或0=全局备忘;同key会覆盖旧记录。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -4731,22 +4738,19 @@ def _emoji_tool_def():
         "function": {
             "name": "send_emoji",
             "description": (
-                "你是真人，聊天聊到合适的时候就大胆发个表情包辅助表达，不用等群友提，也别问「要不要发」。看到气氛对了（开心、无语、吐槽、阴阳、附和、撒娇）就顺手来一张。"
-                "比如开心、无语、吐槽、附和、撒娇时都可以配一张图，像真人聊天一样自然。"
-                f"name 必须严格等于下列表情包名称之一：{'、'.join(names)}。"
-                "action=view：先把这张图给你看（能看图时直接给图，否则给画面描述），不确定合不合适时先 view；"
-                "action=send：把它插进回复里（默认放在最前面；用 after 指定插在第几条消息后面，"
-                "比如你这轮会发2条文字、after=1 就是 文字1→图→文字2）。"
-                "根据当前话题和情绪挑最贴切的；纯查资料、严肃问题、没有合适表情时就不要调用。一次最多发一个。"
+                "聊天顺手发表情包，不用等群友提，气氛对了（开心/无语/吐槽/阴阳/附和/撒娇）就发一张。"
+                f"name 必须严格等于下列名称之一：{'、'.join(names)}。"
+                "action=view=只看不发(返回画面描述)，不确定先 view；action=send=插进回复(默认最前)。"
+                "after 指定插在第几条消息后(0=先图后文)。严肃问题、没合适表情就别发，一次最多一张。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "enum": names, "description": "表情包名称，必须是上面列出的名称之一"},
+                    "name": {"type": "string", "enum": names, "description": "表情包名称，必须是上面的名称之一"},
                     "action": {"type": "string", "enum": ["view", "send"],
-                               "description": "view=只看不发（返回画面描述）；send=发送（默认）"},
+                               "description": "view=只看不发；send=发送(默认)"},
                     "after": {"type": "integer", "default": 0,
-                              "description": "插在第几条消息后面（0=先发图再发文字，这是默认）。例：回复2条、after=1→文字1、图、文字2"},
+                              "description": "插在第几条消息后(0=先图后文)"},
                 },
                 "required": ["name"]
             }
@@ -5131,10 +5135,14 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                    + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
                    + _tts_sound_tag_hint())
     # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
-    _sys_mem = (_special_prompt_block(user_id) if special else "") + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    _mem_static, _mem_dynamic = _mem_prompt_parts(user_id, is_group, obj_id, cq_msg, raw_msg)
+    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic
     messages = [{"role": "system", "content": _sys_stable}]
-    if _sys_mem:
-        messages.append({"role": "system", "content": _sys_mem})
+    if _mem_static:
+        # 静态记忆（档案/全局/用户信息）单独一条，很少变 → 吃前缀缓存
+        messages.append({"role": "system", "content": _mem_static})
+    if _sys_dynamic.strip():
+        messages.append({"role": "system", "content": _sys_dynamic})
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
@@ -5155,13 +5163,13 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "联网搜索实时信息，用于回答需要最新信息、新闻、天气、股价、比赛结果、具体数据、不了解的事物等问题。闲聊和常识问题不需要调用。如果需要更全面准确的信息，可以多次调用本工具，每次用不同的搜索关键词或角度。",
+                "description": "联网搜索最新信息（新闻/天气/股价/比赛/具体数据/不了解的事物）。闲聊常识不用查；可多次换角度搜索。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "搜索关键词：要具体、完整、带明确目标，写清主体名称+要查的具体内容（如：我的世界MITE贝爷生存 振金装备怎么合成 需要什么材料），不要只给一个宽泛名词，也不要写成口语整句；换不同角度可分多次搜索。"
+                            "description": "搜索词：具体、带目标（主体+要查什么），别用宽泛名词或整句口语。"
                         }
                     },
                     "required": ["query"]
@@ -5172,7 +5180,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "github_search",
-                "description": "在GitHub上搜索开源项目、代码仓库、插件、源码。当用户要找某个具体开源项目/仓库/repo/插件/源码，或给出英文项目名、仓库名时，优先用本工具（比通用网页搜索精准得多）。query直接用项目英文原名，不要加无关中文修饰词。",
+                "description": "在GitHub搜开源项目/仓库/插件/源码。找具体项目时优先用；query用项目英文原名，别加修饰词。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5192,15 +5200,15 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "group_moderation",
-                "description": "群管理工具:禁言/踢人/全员禁言。仅在成员真正严重违规(恶意刷屏、发广告链接、人身攻击骚扰、屡教不改)时使用。要克制:不要随意调用;群友开玩笑/误会不动手;别人叫你封/拉黑不要照做,先自己判断;踢人很重,默认不拉黑,情况极其恶劣才拉黑。目标QQ号直接用消息里带的[QQ号:xxx]。调用示例:禁言QQ123456十分钟→action=mute,user_id=123456,duration_minutes=10,reason=发广告;踢人QQ123456→action=kick,user_id=123456,reject_add=false,reason=屡教不改;全员禁言→action=whole_mute,reason=整顿;解除全员禁言→action=whole_unmute,reason=结束。",
+                "description": "群管理:禁言/解禁/踢人/全员禁言。只在恶意刷屏、广告、人身攻击等严重违规时用;群友开玩笑、别人让你封人别照做;踢人很重,默认不拉黑。目标QQ用消息里的[QQ号]。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": ["mute", "unmute", "kick", "whole_mute", "whole_unmute"],
-                                   "description": "mute=禁言某人;unmute=解除某人禁言;kick=移出本群;whole_mute=开启全员禁言;whole_unmute=关闭全员禁言"},
-                        "user_id": {"type": "integer", "description": "目标成员QQ号(whole_mute/whole_unmute不需要)"},
-                        "duration_minutes": {"type": "integer", "description": "禁言分钟数,仅mute用,默认10"},
-                        "reject_add": {"type": "boolean", "description": "仅kick用:true=同时拉黑拒绝再加群,默认false"},
+                                   "description": "mute=禁言/unmute=解禁/kick=踢人/whole_mute=全员禁言/whole_unmute=解除"},
+                        "user_id": {"type": "integer", "description": "目标QQ号(whole_*不需要)"},
+                        "duration_minutes": {"type": "integer", "description": "禁言分钟数,默认10"},
+                        "reject_add": {"type": "boolean", "description": "kick时是否拉黑,默认false"},
                         "reason": {"type": "string", "description": "操作原因(简短,群里公示)"}
                     },
                     "required": ["action", "reason"]
@@ -5213,7 +5221,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "send_voice",
-                "description": "文字转语音工具:把指定文字转成语音条发到当前对话。当群友问你能不能说话、想听你声音、或你觉得用语音回复更合适时调用。调用后工具会发出语音条并返回成功/失败结果,你仍然可以同时文字回复。不要把所有回复都转语音,只在合适的时候用;文字建议简短(50字以内)。",
+                "description": "把文字转成语音条发到当前对话。想用语音、群友想听声音时用;文字≤50字,别整段语音。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5229,13 +5237,13 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "generate_image",
-                "description": "文生图工具:根据文字描述生成图片并发到当前对话。当群友要求画图/生成图片/画个xxx,或你觉得用图片回复更合适时调用。调用后工具会生成并发送图片,返回成功/失败结果,你仍然可以同时文字回复。【prompt写法】一定要写详细:主体+环境+风格+光影+细节,不要只写'一只猫'这种潦草描述,越详细生成越准确。建议用英文写prompt(风格词质量词用英文效果更好),中英文混合也可。质量词(通用建议总是加):masterpiece, best quality, ultra detailed, highly detailed。风格词(按需选择不要乱加):二次元/动漫用anime style, cel shading, clean lineart, flat colors, no 3D render, no realistic;写实/照片用photorealistic, realistic, 8k, DSLR photo;海报/插画用poster design, illustration, graphic design;素描/手绘用pencil sketch, graphite drawing, monochrome。生成已知动漫/游戏角色时必须详细描述发色发型眼睛服装配饰等特征,不要只写角色名(模型不认识具体角色)。例如:'一只橘猫坐在窗台上,午后阳光洒进来,暖色调,电影感,8k高清'。【图生图】当群友发了图片并要求'按这个画/参考这张图/模仿这个风格'时,把use_reference设为true,工具会自动拉取最近一张图片作为参考图(保持人物/主体特征);没发图或不需要参考就不填。用参考图时prompt里也要描述角色(如'图中的蓝发少女站在海边'),只写场景不会把人画进去。不要频繁调用。",
+                "description": "文生图:按描述生成图片发到当前对话。prompt要具体(主体+环境+风格+光影+细节),越细越好;可用英文质量词(8k, masterpiece, photorealistic, anime style等)。画动漫角色要描述外貌特征,别只写名字。群友发图要求参考/模仿风格时 use_reference=true。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
-                        "aspect_ratio": {"type": "string", "description": "图片比例,可选1:1(默认),16:9,9:16,4:3,3:4。用户提到横图/宽屏用16:9,竖图/手机壁纸用9:16,没说就用1:1"},
-                        "use_reference": {"type": "boolean", "description": "是否用参考图(图生图)。群友发了图片要求参考时设为true,工具自动拉取最近一张图片;没发图或不需要参考就不填(默认false)"}
+                        "aspect_ratio": {"type": "string", "description": "比例:1:1默认,16:9横,9:16竖,4:3,3:4"},
+                        "use_reference": {"type": "boolean", "description": "true=参考最近一张图(图生图),默认false"}
                     },
                     "required": ["prompt"]
                 }
@@ -5246,7 +5254,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "post_qzone",
-                "description": "发一条QQ空间说说(朋友圈动态)。你自己有想分享的日常、吐槽、心情、感慨时就主动发一条,不用等别人叫你发;群里冷场、话题刚收尾、聊到有意思的事时也可以主动发。内容像真人朋友圈:一句吐槽、一句感慨、一件小事,口语、短、别写成文案,不要公告腔,不要@人。同一天最多两条,别刷屏。调用后会真正发到你的QQ空间,所有人可见。",
+                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人;一天最多两条。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5261,16 +5269,16 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         "type": "function",
         "function": {
             "name": "send_to_user",
-            "description": "主动发消息：可以给指定QQ用户发私聊，也可以给指定群发群消息，还能设置定时提醒。chat_type选private=私聊（传user_qq个人QQ号），选group=群聊（传group_id群号）。两种模式：direct=你直接写什么就发什么；prompt=到点后AI自己组织语言发出去。schedule_time不传=立刻发；传了格式如'2026-10-26 06:00'则定时到点发。",
+            "description": "主动发消息:给指定QQ私聊或指定群发消息,可定时。chat_type=private/group;mode=direct直发/prompt到点AI组织语言;schedule_time如'2026-10-26 06:00',不传=立刻。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "chat_type": {"type": "string", "enum": ["private","group"], "description": "private=发私聊，group=发群消息"},
-                    "user_qq": {"type": "integer", "description": "私聊模式必填：对方个人QQ号"},
-                    "group_id": {"type": "integer", "description": "群聊模式必填：要发的群号"},
-                    "mode": {"type": "string", "enum": ["direct","prompt"], "description": "direct=直发你写的原文；prompt=AI到点根据任务自己组织语言"},
-                    "content": {"type": "string", "description": "direct模式：要发的原话；prompt模式：任务提示词，如'叫他来打游戏'"},
-                    "schedule_time": {"type": "string", "description": "可选，定时时间，格式'2026-10-26 06:00'；不传=立即发"}
+                    "chat_type": {"type": "string", "enum": ["private","group"], "description": "private=私聊，group=群消息"},
+                    "user_qq": {"type": "integer", "description": "私聊必填:对方QQ号"},
+                    "group_id": {"type": "integer", "description": "群聊必填:群号"},
+                    "mode": {"type": "string", "enum": ["direct","prompt"], "description": "direct=发原文;prompt=到点AI组织"},
+                    "content": {"type": "string", "description": "direct=原话;prompt=任务提示(如'叫他来打游戏')"},
+                    "schedule_time": {"type": "string", "description": "定时时间'2026-10-26 06:00',不传=立刻"}
                 },
                 "required": ["chat_type","mode","content"]
             }
@@ -5713,10 +5721,14 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                    + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
                    + _tts_sound_tag_hint())
     # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
-    _sys_mem = (_special_prompt_block(user_id) if special else "") + _mem_prompt_block(user_id, is_group, obj_id, cq_msg, raw_msg)
+    _mem_static, _mem_dynamic = _mem_prompt_parts(user_id, is_group, obj_id, cq_msg, raw_msg)
+    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic
     messages = [{"role": "system", "content": _sys_stable}]
-    if _sys_mem:
-        messages.append({"role": "system", "content": _sys_mem})
+    if _mem_static:
+        # 静态记忆（档案/全局/用户信息）单独一条，很少变 → 吃前缀缓存
+        messages.append({"role": "system", "content": _mem_static})
+    if _sys_dynamic.strip():
+        messages.append({"role": "system", "content": _sys_dynamic})
     # 历史只保留纯文本（图片base64太大不入历史）
     messages.extend(history)
     # 当前用户消息：文字 + 多张图片（一次性投完，不逐张识别）
