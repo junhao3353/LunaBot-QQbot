@@ -5448,13 +5448,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         if tc.get("function", {}).get("name") in _runnable_names
     ]
 
-    if runnable_calls:
-        # 把带tool_calls的assistant消息加入历史（过滤掉不执行的调用，只保留实际执行的）
-        filtered_msg = dict(message)
-        filtered_msg["tool_calls"] = runnable_calls
-        messages.append(filtered_msg)
-
-        for tool_call in runnable_calls:
+    def _exec_tool_calls(calls):
+        for tool_call in calls:
             _tool_name = tool_call.get("function", {}).get("name")
 
             # 记忆库搜索（语义检索，带前后文）
@@ -5723,36 +5718,40 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 "content": search_result
             })
 
+    if runnable_calls:
+        # 把带tool_calls的assistant消息加入历史（过滤掉不执行的调用，只保留实际执行的）
+        filtered_msg = dict(message)
+        filtered_msg["tool_calls"] = runnable_calls
+        messages.append(filtered_msg)
+
+        _exec_tool_calls(runnable_calls)
         # 第二次调用：AI结合搜索结果回答（同样兜底网络异常）。带上 tools：看完表情包图后这一轮可能要调 send
         data2 = _build_chat_data(DEEPSEEK_MODEL, messages, ENABLE_THINKING_CHAT)
         if tools:
             data2["tools"] = tools
         try:
-            res_json2 = _post_json("https://api.deepseek.com/v1/chat/completions", headers, data2, 30, "对话模型")
-            _choices2 = res_json2.get("choices") or []
-            if _choices2:
+            # 第二轮之后：只要 AI 还想调工具就继续执行（最多再跑 3 轮），
+            # 这样同一轮里连发两条语音/图片/表情都能执行，而不是只认第一轮。
+            for _extra_round in range(3):
+                data_r = _build_chat_data(DEEPSEEK_MODEL, messages, ENABLE_THINKING_CHAT)
+                if tools:
+                    data_r["tools"] = tools
+                res_json2 = _post_json("https://api.deepseek.com/v1/chat/completions", headers, data_r, 30, "对话模型")
+                _choices2 = res_json2.get("choices") or []
+                if not _choices2:
+                    reply_text = reply_text or f"AI请求出错：{res_json2.get('error','未知错误')}"
+                    break
                 msg2 = _choices2[0]["message"]
-                reply_text = msg2.get("content", "").strip()
-                _log_reasoning(msg2, "对话-搜索后")
-                # 第二轮可能在看图/搜索之后接着调 send_emoji：直接入队，不回第三轮（省一次API）
-                for _tc2 in (msg2.get("tool_calls") or []):
-                    try:
-                        if _tc2.get("function", {}).get("name") != "send_emoji":
-                            continue
-                        _a2 = json.loads(_tc2["function"].get("arguments") or "{}")
-                        _n2 = str(_a2.get("name", "") or "").strip()
-                        _act2 = str(_a2.get("action", "send") or "send").strip().lower()
-                        try:
-                            _pos2 = max(0, int(_a2.get("after") or 0))
-                        except Exception:
-                            _pos2 = 0
-                        if _act2 == "send" and _n2 and pending_emojis is not None and not pending_emojis:
-                            pending_emojis.append((_n2, _pos2))
-                            print(f"😀 [第二轮] AI选择表情包：{_n2}（插在第 {_pos2} 条后）")
-                    except Exception:
-                        continue
-            else:
-                reply_text = f"AI请求出错：{res_json2.get('error','未知错误')}"
+                reply_text = (msg2.get("content") or "").strip() or reply_text
+                _log_reasoning(msg2, f"对话-第{_extra_round + 2}轮")
+                _calls2 = [tc for tc in (msg2.get("tool_calls") or [])
+                           if tc.get("function", {}).get("name") in _runnable_names]
+                if not _calls2:
+                    break
+                messages.append({"role": "assistant",
+                                 "content": msg2.get("content", "") or "",
+                                 "tool_calls": _calls2})
+                _exec_tool_calls(_calls2)
         except Exception as e:
             print(f"❌ {e}")
             reply_text = reply_text or "（我这边网络卡了一下，再说一遍？）"
