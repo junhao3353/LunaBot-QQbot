@@ -684,7 +684,7 @@ class MemoryV2:
         self.userinfo = _mem_load_json(self.userinfo_path, {"users": {}, "updated_at": 0})
         self.profiles.setdefault("users", {})
         self.profiles.setdefault("global", {"entries": [], "summary": ""})
-        for k, v in (("contexts", {}), ("qzone", []), ("digest", []), ("memos", []), ("recent_speakers", []), ("warned", False)):
+        for k, v in (("contexts", {}), ("qzone", []), ("digest", []), ("memos", []), ("recent_speakers", []), ("offline", []), ("warned", False)):
             self.temp.setdefault(k, v)
         self.userinfo.setdefault("users", {})
         self._save_profiles(); self._save_temp(); self._save_userinfo()
@@ -925,6 +925,8 @@ class MemoryV2:
         dg = self.render_digest()
         if dg:
             parts.append(dg)
+        if self.temp.get("offline"):
+            parts.append("【你下线期间的消息】\n" + "\n".join(self.temp["offline"][-40:]))
         if self.temp.get("memos"):
             parts.append("【临时备忘】\n" + "\n".join(f"[{x.get('date','')}] {x.get('text','')}" for x in self.temp["memos"]))
         return "\n\n".join(parts)
@@ -1919,7 +1921,7 @@ def _pro_private_info(uid: int) -> str:
     return "\n".join(lines[-8:]) if lines else "（没有私聊记录，不熟悉就不要主动私聊）"
 
 
-def _pro_build_targets(now: float) -> list:
+def _pro_build_targets(now: float, ignore_filters: bool = False) -> list:
     """构建候选目标列表，已过滤排除名单/死寂/活跃保护。
     返回 [(target_type, target_id, name, last_human_ts, info)]"""
     targets = []
@@ -1928,10 +1930,11 @@ def _pro_build_targets(now: float) -> list:
             continue
         key = f"g{gid}"
         lh = _pro_human_ts(key)
-        if now - lh > PROACTIVE_DEAD_SECONDS:
-            continue  # 死寂群，发了没人看
-        if now - lh < PROACTIVE_ACTIVE_PROTECT:
-            continue  # 正在聊，不插话
+        if not ignore_filters:
+            if now - lh > PROACTIVE_DEAD_SECONDS:
+                continue  # 死寂群，发了没人看
+            if now - lh < PROACTIVE_ACTIVE_PROTECT:
+                continue  # 正在聊，不插话
         targets.append(("group", gid, f"群{gid}", lh, _pro_group_info(gid)))
     if ENABLE_PROACTIVE_PRIVATE:
         for uid in (ALLOWED_USERS or []):
@@ -1939,10 +1942,11 @@ def _pro_build_targets(now: float) -> list:
                 continue
             key = f"p{uid}"
             lh = _pro_human_ts(key)
-            if now - lh > PROACTIVE_DEAD_SECONDS:
-                continue
-            if now - lh < PROACTIVE_ACTIVE_PROTECT:
-                continue
+            if not ignore_filters:
+                if now - lh > PROACTIVE_DEAD_SECONDS:
+                    continue
+                if now - lh < PROACTIVE_ACTIVE_PROTECT:
+                    continue
             targets.append(("private", uid, _pro_private_name(uid), lh, _pro_private_info(uid)))
     if ENABLE_PROACTIVE_QZONE:
         targets.append(("qzone", 0, "QQ空间说说", now,
@@ -2039,12 +2043,12 @@ def _pro_append_history(target_type: str, target_id: int, message: str):
             print(f"⚠️ 主动消息入队记忆库失败：{e}")
 
 
-async def _proactive_trigger(websocket):
+async def _proactive_trigger(websocket, wake_reason=None):
     """一次主动消息触发：统计没回→建目标池→AI先自己想话题(找不到才search补搜)→发送前复查→发送入历史。"""
     global _pro_used_topics
     now = time.time()
     _pro_update_noreply()
-    targets = _pro_build_targets(now)
+    targets = _pro_build_targets(now, ignore_filters=bool(wake_reason))
     if not targets:
         print("🫥 主动消息：没有可发目标（全在聊天/被排除/死寂），本轮跳过")
         return
@@ -2083,10 +2087,25 @@ async def _proactive_trigger(websocket):
         _pro_special = ""
     _pro_digest = _mem.render_digest(limit=10) if (MEMORY_ENABLED and _mem is not None) else ""
     _qzone_ok = bool(ENABLE_PROACTIVE_QZONE and any(t[0] == "qzone" for t in targets))
+    if wake_reason:
+        try:
+            _sleep_str = time.strftime("%m-%d %H:%M", time.localtime(float(wake_reason.get("sleep_at") or 0)))
+        except Exception:
+            _sleep_str = "昨晚"
+        _kind = wake_reason.get("kind")
+        if _kind == "early":
+            _wake_line = (f"【你被提前叫醒了】你本来打算 {_sleep_str} 睡到 {time.strftime('%H:%M', time.localtime(float(wake_reason.get('wake_at') or 0)))}，"
+                          f"现在被叫醒了，还没睡够、有点迷糊。看看【你下线期间的消息】，可以回一句/发个早安说说，也可以什么都不做。")
+        else:
+            _wake_line = (f"【你刚睡醒】你从 {_sleep_str} 睡到现在，刚起床。先看看【你下线期间的消息】群里发生了什么，"
+                          f"再决定要不要发个早安/说说，或者什么都不做。别装没睡过，也别把睡觉说得太刻意。")
+    else:
+        _wake_line = ""
     _task = ["", "", "【主动活跃任务】",
              "现在没有人和你说话，你要主动活跃一下：挑一个目标发起聊天"
              + ("，也可以发一条空间说说" if _qzone_ok else "") + "。目的是像真人一样偶尔冒个泡，不是完成任务。",
              "⚠️ 本次是主动发言，没有工具可调用：不要输出表情包/说说/搜记忆/群管理这些工具调用，只按下面 JSON 格式回答。",
+             _wake_line,
              "",
              "怎么开口（按顺序挑）：",
              "1. 大约一半的情况，别找话题，直接来一句没信息量但有人味的话："
@@ -2757,6 +2776,19 @@ ENABLE_VOICE = True             # 语音转文字总开关：false=不处理群�
 
 
 # ===================== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====================
+# 睡觉功能
+SLEEP_ENABLED = True
+SLEEP_TOKEN = ""                       # 与 yml sleep_token 相同
+SLEEP_CONTROLLER_URL = "http://qq-controller:6650"
+SLEEP_FILE = "/data/sleep.json"        # bot-data 卷，controller 也能读
+SLEEP_MIN_HOURS = 8
+SLEEP_MAX_HOURS = 10
+SLEEP_WINDOW_START = 20                # 20:00 起允许睡觉
+SLEEP_WINDOW_END = 5                   # 05:00 后不再允许
+_sleep_wake_info = None                # 启动时检测到的起床信息
+_sleep_offline_until = 0.0             # 这段时间内的旧消息只缓存不回复
+_startup_ts = 0.0
+
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
 MERGE_WAIT_SECONDS = 20             # 合并窗口（秒）：N秒内无新消息才处理（真人也不会秒回，拉长些让大家充分发完，防止多人@时漏消息）
 ENABLE_INPUT_STATUS = True          # 用「对方正在输入」事件优化：停止输入后提前回复
@@ -3314,6 +3346,148 @@ async def api_call(websocket, action: str, params: dict, timeout: float = 8.0) -
         return {}
     finally:
         _pending_echo.pop(echo, None)
+
+
+def _sleep_now_ok(now=None) -> bool:
+    """当前是否在允许睡觉的时间窗内（支持跨午夜，如 20:00~05:00）"""
+    if not SLEEP_ENABLED:
+        return False
+    h = (now or time.localtime()).tm_hour
+    s0, e0 = SLEEP_WINDOW_START, SLEEP_WINDOW_END
+    if s0 <= e0:
+        return s0 <= h < e0
+    return h >= s0 or h < e0
+
+
+def _sleep_read_file():
+    try:
+        with open(SLEEP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _sleep_consume_file():
+    """读并消费睡觉文件（改名 .done），防止重启重复触发起床问候"""
+    data = _sleep_read_file()
+    if data is None:
+        return None
+    try:
+        os.replace(SLEEP_FILE, SLEEP_FILE + ".done")
+    except Exception:
+        pass
+    return data
+
+
+def _wake_detect():
+    """启动时检测：正常起床 / 被提前叫醒 / 睡过头（返回 None=当普通启动）"""
+    global _sleep_wake_info, _sleep_offline_until, _startup_ts
+    _startup_ts = time.time()
+    data = _sleep_consume_file()
+    if not data:
+        return None
+    try:
+        wake_at = float(data.get("wake_at") or 0)
+        sleep_at = float(data.get("sleep_at") or 0)
+    except Exception:
+        return None
+    now = time.time()
+    try:
+        _wstr = time.strftime("%m-%d %H:%M", time.localtime(wake_at))
+    except Exception:
+        _wstr = "?"
+    if not wake_at or now > wake_at + 30 * 60:
+        print(f"😴 睡觉文件已过期（预计 {_wstr} 起），按正常启动处理")
+        return None
+    kind = "early" if now < wake_at - 15 * 60 else "normal"
+    info = {"kind": kind, "sleep_at": sleep_at, "wake_at": wake_at,
+            "reason": str(data.get("reason") or "")}
+    _sleep_wake_info = info
+    _sleep_offline_until = now + 180
+    print(f"🌅 检测到睡醒：{'被提前叫醒' if kind == 'early' else '正常起床'}，预计 {_wstr}")
+    return info
+
+
+def _sync_send_text(chat_id, is_group, text) -> bool:
+    """在同步线程里往当前会话发一条文本"""
+    if _MAIN_LOOP is None or _WS_REF is None or not text:
+        return False
+    try:
+        coro = (send_group_msg(_WS_REF, chat_id, text, no_delay=True) if is_group
+                else send_private_msg(_WS_REF, chat_id, text, no_delay=True))
+        fut = asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)
+        return fut.result(timeout=30)
+    except Exception as e:
+        print(f"⚠️ 睡前消息发送失败：{e}")
+        return False
+
+
+def _sync_sleep(is_group, chat_id, reason, goodnight="") -> str:
+    """同步执行：发晚安 → 通知控制器睡觉（控制器 3 秒后停容器）"""
+    if not SLEEP_ENABLED:
+        return "❌ 睡觉功能未开启"
+    if not SLEEP_TOKEN:
+        return "❌ 未配置 sleep_token，无法睡觉"
+    if not _sleep_now_ok():
+        return f"❌ 现在不在睡觉时间（只能在 {SLEEP_WINDOW_START}:00~{SLEEP_WINDOW_END}:00）"
+    if goodnight:
+        _sync_send_text(chat_id, is_group, goodnight)
+    try:
+        r = requests.post(f"{SLEEP_CONTROLLER_URL}/api/sleep",
+                          headers={"X-Sleep-Token": SLEEP_TOKEN, "Content-Type": "application/json"},
+                          json={"reason": reason or ""}, timeout=10)
+        if r.status_code != 200:
+            return f"❌ 睡觉请求失败 HTTP {r.status_code}：{(r.text or '')[:120]}"
+        d = r.json() or {}
+        _wk = time.strftime("%m-%d %H:%M", time.localtime(float(d.get("wake_at") or 0)))
+        print(f"😴 已进入睡眠，预计 {_wk} 醒来（{d.get('hours')} 小时）")
+        return f"✅ 已进入睡眠，预计 {_wk} 自动醒来"
+    except Exception as e:
+        return f"❌ 睡觉请求异常：{e}"
+
+
+def _offline_add(data) -> None:
+    """把离线消息记到临时记忆，供起床时参考"""
+    if _mem is None:
+        return
+    try:
+        uid = data.get("user_id") or 0
+        gid = data.get("group_id") or 0
+        nick = (data.get("sender") or {}).get("nickname") or str(uid)
+        cq = message_to_cq_str(data.get("message", "") or "")
+        _txt = re.sub(r"\[CQ:[^\]]*\]", "", cq).strip() or "[图片/表情]"
+        _ts = float(data.get("time") or time.time())
+        _when = time.strftime("%m-%d %H:%M", time.localtime(_ts))
+        _who = f"群{gid}" if gid else "私聊"
+        line = f"[{_when}][{_who}] {nick}：{_txt[:120]}"
+        with _mem_lock:
+            lst = _mem.temp.setdefault("offline", [])
+            lst.append(line)
+            _mem.temp["offline"] = lst[-40:]
+            _mem._save_temp()
+    except Exception as e:
+        print(f"⚠️ 离线消息记录失败：{e}")
+
+
+async def _wake_greeting(websocket):
+    """起床问候：等离线消息收完，再走一次主动消息决策"""
+    global _sleep_wake_info
+    info = _sleep_wake_info
+    if not info:
+        return
+    try:
+        await asyncio.sleep(8)   # 给 NapCat 推送积压消息的时间
+        await _proactive_trigger(websocket, wake_reason=info)
+    except Exception as e:
+        print(f"⚠️ 起床问候失败：{e}")
+    finally:
+        _sleep_wake_info = None
+        try:
+            if _mem is not None:
+                _mem.temp["offline"] = []
+                _mem._save_temp()
+        except Exception:
+            pass
 
 
 async def send_group_msg(websocket, group_id: int, msg: str, no_delay: bool = False):
@@ -4825,6 +4999,26 @@ def scan_emoji_dir():
               f"{'…' if len(EMOJI_MAP) > 12 else ''}")
 
 
+def _sleep_tool_def():
+    """睡觉工具：只在允许的时间窗外就不下发（由调用方控制）"""
+    return {
+        "type": "function",
+        "function": {
+            "name": "sleep",
+            "description": ("去睡觉：你会下线（NapCat 和主程序都停），随机 8~10 小时后自动醒来。"
+                            "只在群友明确说晚安/让你去睡，或你自己真的困了要睡时用；每天最多一次。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "为什么要睡（一句话，会写日志）"},
+                    "goodnight": {"type": "string", "description": "睡前发到当前对话的一句话，比如「晚安，我先睡啦」"}
+                },
+                "required": ["reason"]
+            }
+        }
+    }
+
+
 def _emoji_tool_def():
     """动态生成 send_emoji 工具定义（enum 用当前扫描到的表情名，AI只能从已有表情里选）。"""
     names = list(EMOJI_MAP.keys())
@@ -5345,6 +5539,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 }
             }
         })
+    if _sleep_now_ok():
+        tools.append(_sleep_tool_def())
     if ENABLE_PROACTIVE_QZONE:
         tools.append({
             "type": "function",
@@ -5436,6 +5632,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.add("generate_image")
     if ENABLE_PROACTIVE_QZONE:
         _runnable_names.add("post_qzone")
+    if _sleep_now_ok():
+        _runnable_names.add("sleep")
     _runnable_names.add("send_to_user")  # 主动私聊工具：无条件下发，也必须无条件可执行
     if ENABLE_EMOJI and EMOJI_MAP:
         _runnable_names.add("send_emoji")
@@ -5605,6 +5803,19 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "❌ prompt参数为空,未生成图片"})
+                continue
+
+            if _tool_name == "sleep":
+                try:
+                    _sd = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _sd = {}
+                _reason = str(_sd.get("reason") or "")[:100]
+                _gn = str(_sd.get("goodnight") or "").strip()
+                print(f"😴 AI请求睡觉：{_reason}｜晚安语：{_gn}")
+                _sres = _sync_sleep(is_group, obj_id, _reason, _gn)
+                print(f"😴 睡觉结果：{_sres}")
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _sres})
                 continue
 
             if _tool_name == "post_qzone":
@@ -6537,11 +6748,14 @@ async def _merge_worker(ws, chat_id, is_group):
 
 # 说明：max_size 放宽到 64MB。默认 1MB 时，发 base64 表情/大图后 NapCat 回传的事件会超限触发 1009 断连
 async def main():
+    _wake_detect()   # 睡眠后重启：判断是正常起床 / 被提前叫醒
     async with websockets.connect(ONEBOT_WS, max_size=64 * 1024 * 1024) as ws:
         print("✅ 成功连接 Lagrange.OneBot！等待群消息...")
         global _MAIN_LOOP, _WS_REF
         _MAIN_LOOP = asyncio.get_running_loop()
         _WS_REF = ws
+        if _sleep_wake_info:
+            asyncio.create_task(_wake_greeting(ws))
         print(f"📋 已启用群白名单，只回复群: {ALLOWED_GROUPS}")
         print(f"👤 已启用私聊白名单，只回复QQ: {ALLOWED_USERS}")
         print("🎭 已加载系统提示词，机器人身份已设定")
@@ -6673,6 +6887,15 @@ async def main():
                 data = await event_queue.get()
                 if data is None:  # 连接已断开
                     break
+                # 睡醒后 NapCat 会把积压消息一股脑推过来：只记进临时记忆，不回复
+                if _sleep_wake_info and data.get("post_type") == "message":
+                    try:
+                        _evt_ts = float(data.get("time") or 0)
+                    except Exception:
+                        _evt_ts = 0
+                    if _evt_ts and _evt_ts < _startup_ts - 30:
+                        _offline_add(data)
+                        continue
                 # 输入状态事件（NapCat 扩展）：用于提前触发回复
                 if data.get("post_type") == "notice":
                     if data.get("notice_type") == "notify" and data.get("sub_type") == "input_status":
@@ -7390,6 +7613,16 @@ def _load_config_file():
     BREEZE_VOICE = s("breeze_voice", BREEZE_VOICE) or BREEZE_VOICE
     BREEZE_TTS_MODEL = s("breeze_model", BREEZE_TTS_MODEL) or BREEZE_TTS_MODEL
     BREEZE_INSTRUCTIONS = s("breeze_instructions", BREEZE_INSTRUCTIONS) or ""
+    global SLEEP_ENABLED, SLEEP_TOKEN, SLEEP_CONTROLLER_URL, SLEEP_FILE
+    global SLEEP_MIN_HOURS, SLEEP_MAX_HOURS, SLEEP_WINDOW_START, SLEEP_WINDOW_END
+    SLEEP_ENABLED = b("sleep_enabled", SLEEP_ENABLED)
+    SLEEP_TOKEN = s("sleep_token", SLEEP_TOKEN) or SLEEP_TOKEN
+    SLEEP_CONTROLLER_URL = s("sleep_controller_url", SLEEP_CONTROLLER_URL) or SLEEP_CONTROLLER_URL
+    SLEEP_FILE = s("sleep_file", SLEEP_FILE) or SLEEP_FILE
+    SLEEP_MIN_HOURS = i("sleep_min_hours", SLEEP_MIN_HOURS)
+    SLEEP_MAX_HOURS = i("sleep_max_hours", SLEEP_MAX_HOURS)
+    SLEEP_WINDOW_START = i("sleep_window_start", SLEEP_WINDOW_START)
+    SLEEP_WINDOW_END = i("sleep_window_end", SLEEP_WINDOW_END)
     _tts_engine = s("tts_engine", "")
     if _tts_engine:
         TTS_ENGINE = _tts_engine

@@ -13,6 +13,7 @@ import asyncio
 import hmac
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -144,6 +145,109 @@ def docker_stop(name):
     except Exception as e:
         log(f"❌ 停止容器 {name} 失败: {e}")
         return False, f"失败: {e}"
+
+
+def docker_start(name):
+    try:
+        c = get_docker_client().containers.get(name)
+        c.start()
+        log(f"✅ 已启动容器: {name}")
+        return True, "已启动"
+    except Exception as e:
+        log(f"❌ 启动容器 {name} 失败: {e}")
+        return False, f"失败: {e}"
+
+
+def docker_is_running(name):
+    try:
+        c = get_docker_client().containers.get(name)
+        return c.status == "running"
+    except Exception:
+        return False
+
+
+# ===================== 睡觉 / 唤醒 =====================
+SLEEP_FILE = os.environ.get("CTRL_SLEEP_FILE", "/data/sleep.json")
+
+
+def _sleep_read():
+    try:
+        with open(SLEEP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _sleep_write(data):
+    try:
+        os.makedirs(os.path.dirname(SLEEP_FILE), exist_ok=True)
+        tmp = SLEEP_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SLEEP_FILE)
+        return True
+    except Exception as e:
+        log(f"❌ 写睡觉文件失败: {e}")
+        return False
+
+
+def _sleep_config():
+    cfg = _app_config() or {}
+    try:
+        mn = float(cfg.get("sleep_min_hours") or 8)
+        mx = float(cfg.get("sleep_max_hours") or 10)
+    except Exception:
+        mn, mx = 8.0, 10.0
+    if mx <= mn:
+        mx = mn + 2
+    return {"min": mn, "max": mx,
+            "ai": (_cfg or {}).get("container_ai") or "qq-bot",
+            "napcat": (_cfg or {}).get("container_napcat") or "qq-napcat",
+            "token": str(cfg.get("sleep_token") or "").strip()}
+
+
+def _sleep_stop_containers(ai, napcat, delay=3):
+    """延迟几秒再停容器，让 bot 的晚安消息/HTTP 响应先走完"""
+    def _do():
+        time.sleep(delay)
+        docker_stop(ai)
+        docker_stop(napcat)
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _sleep_wake(ai, napcat):
+    docker_start(napcat)
+    time.sleep(5)   # 等 napcat 连上，bot 才连得到 WS
+    docker_start(ai)
+
+
+def _sleep_scheduler():
+    """常驻线程：到点把 napcat + bot 拉起来"""
+    while True:
+        try:
+            data = _sleep_read()
+            if data:
+                wake_at = float(data.get("wake_at") or 0)
+                cfgs = _sleep_config()
+                if wake_at and time.time() >= wake_at:
+                    if not data.get("woken_at"):
+                        if docker_is_running(cfgs["ai"]):
+                            log("😴 睡觉文件到点但 bot 已在运行（提前叫醒），只标记唤醒")
+                        else:
+                            log(f"⏰ 到点唤醒：启动 {cfgs['napcat']} + {cfgs['ai']}")
+                            _sleep_wake(cfgs["ai"], cfgs["napcat"])
+                        data["woken_at"] = time.time()
+                        _sleep_write(data)
+        except Exception as e:
+            log(f"⚠️ 睡觉调度异常: {e}")
+        time.sleep(30)
+
+
+def _sleep_scheduler_start():
+    threading.Thread(target=_sleep_scheduler, daemon=True).start()
+    log("😴 睡觉调度已启动")
 
 
 # ===================== 待发消息队列 =====================
@@ -1754,6 +1858,35 @@ class _WebUIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json(400, {"ok": False, "error": f"请求格式错误：{e}"})
             return
+        if path == "/api/sleep":
+            cfgs = _sleep_config()
+            supplied = (self.headers.get("X-Sleep-Token") or "").strip()
+            if not cfgs["token"] or not hmac.compare_digest(supplied, cfgs["token"]):
+                self._json(401, {"ok": False, "error": "unauthorized"})
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8", "replace") or "{}")
+            except Exception:
+                body = {}
+            now = time.time()
+            try:
+                hours = float(body.get("hours") or 0)
+            except Exception:
+                hours = 0
+            if hours <= 0:
+                hours = random.uniform(cfgs["min"], cfgs["max"])
+            hours = max(0.5, min(24.0, hours))
+            data = {"sleep_at": now, "wake_at": now + hours * 3600, "hours": round(hours, 2),
+                    "reason": str(body.get("reason") or "")[:200], "created_at": now}
+            if not _sleep_write(data):
+                self._json(500, {"ok": False, "error": "写睡觉文件失败"})
+                return
+            log(f"😴 收到睡觉请求：{hours:.2f} 小时后（{datetime.fromtimestamp(data['wake_at']):%m-%d %H:%M}）唤醒，原因：{data['reason']}")
+            self._json(200, {"ok": True, "wake_at": data["wake_at"], "hours": data["hours"]})
+            _sleep_stop_containers(cfgs["ai"], cfgs["napcat"], delay=3)
+            return
         if not self._authorized():
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
@@ -1882,6 +2015,7 @@ async def main():
 
     # 启动 WebUI（配置界面，第一版只有仪表盘）
     start_webui()
+    _sleep_scheduler_start()
 
     ws_port = _cfg.get("ws_port", WS_PORT)
     log(f"🔊 反向WS服务端启动，监听 0.0.0.0:{ws_port}，等待NapCat反向连接...")

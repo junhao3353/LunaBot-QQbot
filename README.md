@@ -134,3 +134,35 @@ WebUI 默认 `http://localhost:6650`，首次启动在 NapCat WebUI 添加反向
 ## ⚠️ 免责声明
 
 使用本项目所产生的一切后果由使用者自行承担。
+
+## 睡觉功能
+
+AI 可以在 **20:00~05:00** 主动调用 `sleep` 工具去睡觉（白天不下发这个工具）：
+
+1. AI 发一句晚安 → 调控制器 `/api/sleep`
+2. 控制器写 `/data/sleep.json`（sleep_at / wake_at / reason），3 秒后停掉 `qq-napcat` 和 `qq-bot`
+3. 随机 8~10 小时后，控制器按顺序 `docker start qq-napcat` → 等 5 秒 → `docker start qq-bot`
+4. bot 启动时读 sleep.json：
+   - 预计时间 ±窗口内 → 正常起床，AI 看离线消息后决定发早安/说说/skip
+   - 比预计早 15 分钟以上 → 被提前叫醒，提示词改成"有点迷糊"
+   - 比预计晚 30 分钟以上 → 当作普通启动，删掉文件
+5. 起床后 NapCat 会推积压消息，bot 只记进 `temp.json` 的 `offline`（不回复），起床问候时供 AI 参考，问候完清空
+
+配置（`qqbot-config.yml`）：
+
+```yaml
+sleep_enabled: true
+sleep_token: "随机串（bot 与控制器共用）"
+sleep_controller_url: "http://qq-controller:6650"
+sleep_file: "/data/sleep.json"
+sleep_min_hours: 8
+sleep_max_hours: 10
+sleep_window_start: 20
+sleep_window_end: 5
+```
+
+**兜底**：如果控制器挂了，bot 睡了不会自己醒，手动执行：
+
+```bash
+docker start qq-napcat && sleep 5 && docker start qq-bot
+```

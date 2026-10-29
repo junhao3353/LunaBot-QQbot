@@ -297,3 +297,13 @@ embedding_api_key: ""
 embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 embedding_model: "text-embedding-v4"
 embedding_dim: 1024
+
+# 睡觉功能（AI 主动睡觉：控制器停 NapCat+bot，随机 8~10 小时后自动唤醒）
+sleep_enabled: true
+sleep_token: "rI0kDY8bScN6ZC_-54mZqXdFJcoqx_90"
+sleep_controller_url: "http://qq-controller:6650"
+sleep_file: "/data/sleep.json"
+sleep_min_hours: 8
+sleep_max_hours: 10
+sleep_window_start: 20
+sleep_window_end: 5
