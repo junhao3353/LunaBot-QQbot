@@ -805,8 +805,10 @@ class MemoryV2:
             self.temp["digest"] = d[-max(1, MEMORY_DIGEST_MAX):]
             self._save_temp()
 
-    def render_digest(self):
+    def render_digest(self, limit=None):
         d = self.temp.get("digest") or []
+        if limit:
+            d = d[-max(1, int(limit)):]
         if not d:
             return ""
         return "【近期摘要】\n" + "\n".join(d)
@@ -867,11 +869,19 @@ class MemoryV2:
             return ""
         return (f"摘要：{g.get('summary','')}\n" if g.get("summary") else "") + self._render_entries(entries)
 
-    def render_userinfo(self):
+    def render_userinfo(self, only_qqs=None):
         if not self.userinfo.get("users"):
             return ""
+        _only = None
+        if only_qqs:
+            try:
+                _only = {str(int(x)) for x in only_qqs}
+            except Exception:
+                _only = None
         lines = []
         for qq, u in self.userinfo["users"].items():
+            if _only is not None and str(qq) not in _only:
+                continue
             gs = []
             for gid, g in (u.get("groups") or {}).items():
                 tag = []
@@ -1528,7 +1538,7 @@ def _mem_scope(is_group, obj_id):
     return f"群聊{obj_id}" if is_group else "私聊"
 
 
-def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
+def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg="", userinfo_qqs=None):
     """返回 (静态部分, 动态部分)。
     静态=人物档案/全局备忘/用户信息（很少变 → 放在前面吃前缀缓存）；
     动态=上下文/说说/摘要/备忘（每轮或几小时变一次 → 放后面，变了不影响前面的缓存）。"""
@@ -1563,7 +1573,7 @@ def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
     gl = _mem.render_global()
     if gl:
         static_parts.append("【长期记忆·全局备忘】\n" + gl)
-    ui = _mem.render_userinfo()
+    ui = _mem.render_userinfo(only_qqs=userinfo_qqs)
     if ui:
         static_parts.append("【用户信息（自动拉取）】\n" + ui)
     try:
@@ -2045,13 +2055,13 @@ async def _proactive_trigger(websocket):
                   "还是没有消息，再发一个试试？可以换个目标或者换个话题。")
 
     # 与聊天线复用同一套稳定前缀 + 静态记忆（很少变 → 多次触发可命中缓存）
-    _pro_stable = (build_system_prompt() + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
-                   + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
-                   + _tts_sound_tag_hint())
+    # 主动消息不传 tools，所以不再拼"主动用工具/查记忆/语音标签"这些提示，避免让模型去调不存在的工具
+    _pro_stable = build_system_prompt() + REPLY_STYLE_PROMPT
     _pro_static, _pro_dynamic = ("", "")
     if MEMORY_ENABLED and _mem is not None:
         try:
-            _pro_static, _pro_dynamic = _mem_prompt_parts(0, False, 0, "", "")
+            _pro_uids = [t[1] for t in targets if t[0] == "private"]
+            _pro_static, _pro_dynamic = _mem_prompt_parts(0, False, 0, "", "", userinfo_qqs=_pro_uids)
         except Exception as _e:
             print(f"⚠️ 主动消息读取记忆失败：{_e}")
     # 目标里如果有专属白名单（如老爹），把专属相处方式带上（去掉"这一轮在说话"那套开头）
@@ -2064,35 +2074,39 @@ async def _proactive_trigger(websocket):
                             + str(SPECIAL_PROMPT).strip() + "\n")
     except Exception:
         _pro_special = ""
-    _pro_digest = _mem.render_digest() if (MEMORY_ENABLED and _mem is not None) else ""
-    sys_prompt = _pro_stable + """ 
-
-【主动活跃任务】
-现在没有人和你说话，你要主动活跃一下：可以挑一个目标发起聊天，也可以发一条空间说说（朋友圈动态）。目的是像真人一样偶尔冒个泡，不是完成任务。
-
-怎么找话题（按优先级）：
-1. 优先自己想：结合对方最近聊过的事，抛一个全新的话题——问个近况、吐槽一件事、分享一个想法，哪怕编一个自然的生活话题也行，就像真人突然想到什么就在群里/私聊说一句。
-2. 实在没有任何可聊的信息时，才返回 search 让系统联网搜今天的热点/趣事。
-
-⚠️ 怎么把握"新话题"还是"接续"：
-- 群聊：群里现在很安静，你是突然开口打破安静。群里刚聊完的公共话题不要去接（那是大家已经聊完的），直接抛新话题。
-- 私聊：一对一情况下，可以结合最近私聊里提过的事自然跟进——比如对方之前说过不高兴、约过什么事、提过什么兴趣，你主动问一句"那件事后来怎么样了"是很自然的活人感，不要怕接话。
-- 开口就要带由头：直接说你想分享的事、想问的事、想吐槽的事，别干巴巴一句"在吗"把话头丢给对方。
-
-要求：
-- 像真人发消息：想到什么就说什么，可以自然分段发多条，中间停顿像真人打字。不要刻意凑条数，该一条就一条，该多说两句就自然说。
-- 必须带具体内容，禁止只发"在吗/有人吗/在干嘛/你看了吗"这种空话
-- 禁止发对已经结束的对话做收尾确认：比如"我记下了""我知道了""不用你催"——用户已经说完了，这种话没有继续聊的必要，别发。
-- 主动消息要发一个新的、对方能接话的话题，不是对之前的对话做个收尾。
-- 私聊不要每次都问新闻，像朋友闲聊一样自然；要分享就先把事情说清楚（"今天XX了，你看了没"）
-- 发说说也是正常选项，不是次选：如果你觉得现在没什么好跟特定人说的，或者想分享一句心情/吐槽/日常，就发一条说说（朋友圈动态），这和发消息一样自然，不要觉得发说说就是"没话说"。
-- 只在你真的完全不想说话、没什么可分享的时候才 skip，不要因为"怕没人回"就 skip，发说说也是一种表达。
-- 只输出 JSON：
-  发群/私聊：{"action":"send","target_type":"group或private","target_id":数字ID,"messages":["第一句"]或["第一句","第二句"]}
-  发空间说说：{"action":"qzone","message":"说说内容（像朋友圈一样一句话，不要@谁）"}
-  不想发：{"action":"skip","reason":"原因"}
-  要联网找话题：{"action":"search","query":"搜索关键词"}
-"""
+    _pro_digest = _mem.render_digest(limit=10) if (MEMORY_ENABLED and _mem is not None) else ""
+    _qzone_ok = bool(ENABLE_PROACTIVE_QZONE and any(t[0] == "qzone" for t in targets))
+    _task = ["", "", "【主动活跃任务】",
+             "现在没有人和你说话，你要主动活跃一下：挑一个目标发起聊天"
+             + ("，也可以发一条空间说说" if _qzone_ok else "") + "。目的是像真人一样偶尔冒个泡，不是完成任务。",
+             "⚠️ 本次是主动发言，没有工具可调用：不要输出表情包/说说/搜记忆/群管理这些工具调用，只按下面 JSON 格式回答。",
+             "",
+             "怎么找话题（按优先级）：",
+             "1. 优先自己想：结合对方最近聊过的事，抛一个新话题——问近况、吐槽、分享想法，自然就好。",
+             "2. 实在没可聊的" + ("，才返回 search 让系统联网搜热点/趣事。" if ENABLE_WEB_SEARCH else "，就返回 skip。"),
+             "",
+             "怎么把握新话题还是接续：",
+             "- 群聊：群里很安静，你是突然开口打破安静，别接已经聊完的公共话题，直接抛新话题。",
+             "- 私聊：可以结合最近私聊提过的事自然跟进（之前的近况、约好的事），问一句「那件事后来怎么样了」很自然。",
+             "- 开口就要带由头：直接说想分享/想问/想吐槽的事，别干巴巴一句「在吗」。",
+             "",
+             "要求：",
+             "- 像真人发消息：想到什么说什么，可以自然分多条，不要刻意凑条数。",
+             "- 必须带具体内容，禁止只发「在吗/有人吗/在干嘛/你看了吗」这种空话。",
+             "- 禁止对已经结束的对话做收尾确认（比如「我记下了」「知道了」）。",
+             "- 私聊别每次都问新闻，像朋友闲聊一样自然。"]
+    if _qzone_ok:
+        _task.append("- 发说说也是正常选项：没特别想跟谁说、或想分享心情/吐槽时，发一条说说（朋友圈动态）很自然。")
+    _task += ["- 真不想说话就 skip，但不要因为「怕没人回」就 skip。",
+              "",
+              "只输出 JSON：",
+              "  发群/私聊：{\"action\":\"send\",\"target_type\":\"group或private\",\"target_id\":数字ID,\"messages\":[\"第一句\"]或[\"第一句\",\"第二句\"]}"]
+    if _qzone_ok:
+        _task.append("  发空间说说：{\"action\":\"qzone\",\"message\":\"说说内容（像朋友圈一句话，不要@谁）\"}")
+    if ENABLE_WEB_SEARCH:
+        _task.append("  要联网找话题：{\"action\":\"search\",\"query\":\"搜索关键词\"}")
+    _task.append("  不想发：{\"action\":\"skip\",\"reason\":\"原因\"}")
+    sys_prompt = _pro_stable + "\n".join(_task)
     user_msg = f"{round_hint}\n\n可选目标：\n{target_block}"
     if _pro_used_topics:
         user_msg += "\n\n最近已经发过的话题（不要重复）：\n" + "\n".join("- " + t for t in _pro_used_topics[-5:])
