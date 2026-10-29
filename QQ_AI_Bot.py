@@ -2044,7 +2044,28 @@ async def _proactive_trigger(websocket):
                   if _pro_round <= 1 else
                   "还是没有消息，再发一个试试？可以换个目标或者换个话题。")
 
-    sys_prompt = build_system_prompt() + """
+    # 与聊天线复用同一套稳定前缀 + 静态记忆（很少变 → 多次触发可命中缓存）
+    _pro_stable = (build_system_prompt() + REPLY_STYLE_PROMPT + PROACTIVE_TOOL_PROMPT
+                   + (MEMORY_RECALL_HINT if (MEMORY_BANK_ENABLED and _bank is not None) else "")
+                   + _tts_sound_tag_hint())
+    _pro_static, _pro_dynamic = ("", "")
+    if MEMORY_ENABLED and _mem is not None:
+        try:
+            _pro_static, _pro_dynamic = _mem_prompt_parts(0, False, 0, "", "")
+        except Exception as _e:
+            print(f"⚠️ 主动消息读取记忆失败：{_e}")
+    # 目标里如果有专属白名单（如老爹），把专属相处方式带上（去掉"这一轮在说话"那套开头）
+    _pro_special = ""
+    try:
+        _special_uids = set(int(x) for x in (SPECIAL_PROMPT_USERS or []))
+        if (SPECIAL_PROMPT_ENABLED and SPECIAL_PROMPT and SPECIAL_PROMPT_NAME
+                and any(t[0] == "private" and int(t[1]) in _special_uids for t in targets)):
+            _pro_special = (f"\n\n【给「{SPECIAL_PROMPT_NAME.strip()}」发消息时的专属相处方式】\n"
+                            + str(SPECIAL_PROMPT).strip() + "\n")
+    except Exception:
+        _pro_special = ""
+    _pro_digest = _mem.render_digest() if (MEMORY_ENABLED and _mem is not None) else ""
+    sys_prompt = _pro_stable + """ 
 
 【主动活跃任务】
 现在没有人和你说话，你要主动活跃一下：可以挑一个目标发起聊天，也可以发一条空间说说（朋友圈动态）。目的是像真人一样偶尔冒个泡，不是完成任务。
@@ -2076,8 +2097,12 @@ async def _proactive_trigger(websocket):
     if _pro_used_topics:
         user_msg += "\n\n最近已经发过的话题（不要重复）：\n" + "\n".join("- " + t for t in _pro_used_topics[-5:])
 
-    messages = [{"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_msg}]
+    messages = [{"role": "system", "content": sys_prompt}]
+    if _pro_static:
+        messages.append({"role": "system", "content": _pro_static})
+    if (_pro_special or _pro_digest):
+        messages.append({"role": "system", "content": (_pro_special + ("\n\n" + _pro_digest if _pro_digest else "")).strip()})
+    messages.append({"role": "user", "content": user_msg})
     try:
         raw = await asyncio.to_thread(_pro_llm, messages)
     except Exception as e:
@@ -2096,7 +2121,7 @@ async def _proactive_trigger(websocket):
             search_res = f"搜索出错：{e}"
         messages.append({"role": "assistant", "content": raw})
         messages.append({"role": "user", "content": (
-            f"搜索结果：\n{search_res[:6000]}\n\n"
+            f"搜索结果：\n{search_res[:3000]}\n\n"
             "根据以上素材挑一个目标，输出最终的 send 或 skip JSON。要分享就先把事情说清楚再问，"
             "不要只发'你看了吗'。")})
         try:
@@ -2179,6 +2204,12 @@ async def _proactive_trigger(websocket):
             if target_type == "group":
                 await send_group_msg(websocket, target_id, _m, no_delay=True)
             else:
+                # 私聊先显示"正在输入"再发，像真人先打字
+                await _set_typing(websocket, target_id, True)
+                try:
+                    await asyncio.sleep(random.uniform(1.2, 2.8))
+                finally:
+                    await _set_typing(websocket, target_id, False)
                 await send_private_msg(websocket, target_id, _m, no_delay=True)
     except Exception as e:
         print(f"⚠️ 主动消息发送失败：{e}")
