@@ -3372,7 +3372,7 @@ def _strip_tts_tags(text: str) -> str:
     return re.sub(r'\((laughs|chuckle|sighs|coughs|gasps|breath|um|uh|ah|eh|hmm|snorts|sniffles|yawns|giggles|sobs|whistles|claps|screams)\)', '', text, flags=re.IGNORECASE).strip()
 
 
-async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> bool:
+async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str, style: str = "") -> bool:
     """TTS 把文本转语音并发送语音条（record消息）。失败返回False，由调用方降级为文本。
     生成的mp3放NapCat能读的位置，发完延迟清理。"""
     import tempfile, uuid
@@ -3384,7 +3384,7 @@ async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> b
         _tts_text = text if (TTS_ENGINE == "minimax" and MINIMAX_API_KEY and MINIMAX_TTS_MODEL.startswith("speech-2.8")) else _strip_tts_tags(text)
         if TTS_ENGINE == "breeze" and BREEZE_API_KEY and BREEZE_VOICE:
             # Breeze Blue TTS（支持 (sighs) 之类的语气词标签，保留原文本）
-            ok = await asyncio.to_thread(_breeze_tts_synthesize, _tts_text, tmp)
+            ok = await asyncio.to_thread(_breeze_tts_synthesize, _tts_text, tmp, style)
             if not ok:
                 print("⚠️ Breeze TTS失败，降级edge-tts")
                 import edge_tts
@@ -3575,7 +3575,7 @@ def split_reply_to_parts(text: str) -> list:
     return [p for p in fine if p.strip()]
 
 
-def _breeze_tts_synthesize(text: str, out_path: str) -> bool:
+def _breeze_tts_synthesize(text: str, out_path: str, instructions: str = "") -> bool:
     """Breeze Blue TTS：POST /v1/text-to-speech/{voice_id} 返回 mp3 二进制。"""
     if not BREEZE_API_KEY or not BREEZE_VOICE:
         print("⚠️ Breeze TTS 未配置 API Key 或音色 ID")
@@ -3584,8 +3584,9 @@ def _breeze_tts_synthesize(text: str, out_path: str) -> bool:
         payload = {"text": (text or "")[:900]}
         if BREEZE_TTS_MODEL:
             payload["model_id"] = BREEZE_TTS_MODEL
-        if BREEZE_INSTRUCTIONS:
-            payload["instructions"] = BREEZE_INSTRUCTIONS
+        _ins = (instructions or "").strip() or BREEZE_INSTRUCTIONS
+        if _ins:
+            payload["instructions"] = _ins
         r = requests.post(
             f"{BREEZE_BASE}/v1/text-to-speech/{BREEZE_VOICE}",
             headers={"xi-api-key": BREEZE_API_KEY, "Content-Type": "application/json"},
@@ -4994,13 +4995,13 @@ def _sync_group_mod(group_id, is_group, act: dict) -> str:
         return f"❌ 执行异常：{e}"
 
 
-def _sync_send_voice(chat_id, is_group, text: str) -> bool:
+def _sync_send_voice(chat_id, is_group, text: str, style="") -> bool:
     """同步执行TTS并发语音条（在call_deepseek工作线程里调用）。"""
     if _MAIN_LOOP is None or _WS_REF is None:
         return False
     try:
         fut = asyncio.run_coroutine_threadsafe(
-            _tts_and_send(_WS_REF, is_group, chat_id, text), _MAIN_LOOP)
+            _tts_and_send(_WS_REF, is_group, chat_id, text, style), _MAIN_LOOP)
         return fut.result(timeout=60)
     except Exception as e:
         print(f"⚠️ 语音合成异常: {e}")
@@ -5319,7 +5320,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "要转成语音的文字"}
+                        "text": {"type": "string", "description": "要转成语音的文字"},
+                        "style": {"type": "string", "description": "可选：这句话的语气，比如「轻软撒娇」「委屈一点」「压低声音」；不填用默认语气"}
                     },
                     "required": ["text"]
                 }
@@ -5567,11 +5569,12 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 try:
                     _vd = json.loads(tool_call["function"]["arguments"])
                     _vtext = str(_vd.get("text", "")).strip()
+                    _vstyle = str(_vd.get("style", "") or "").strip()
                 except Exception:
                     _vtext = ""
                 if _vtext:
                     print(f"🔊 AI调用语音合成: {_vtext[:60]}")
-                    _vok = _sync_send_voice(obj_id, is_group, _vtext)
+                    _vok = _sync_send_voice(obj_id, is_group, _vtext, _vstyle)
                     print(f"🔊 语音发送结果: {'成功' if _vok else '失败'}")
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "✅ 语音条已发送" if _vok else "❌ 语音合成或发送失败,请用文字回复"})
@@ -6110,13 +6113,16 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
 
             # 语音工具
             if _tool_name == "send_voice":
+                _vstyle = ""
                 try:
-                    _vtext = str(json.loads(tool_call["function"]["arguments"]).get("text", "")).strip()
+                    _vd2 = json.loads(tool_call["function"]["arguments"])
+                    _vtext = str(_vd2.get("text", "")).strip()
+                    _vstyle = str(_vd2.get("style", "") or "").strip()
                 except Exception:
                     _vtext = ""
                 if _vtext:
                     print(f"🔊 [视觉]AI调用语音: {_vtext[:40]}")
-                    _vok = _sync_send_voice(obj_id, is_group, _vtext)
+                    _vok = _sync_send_voice(obj_id, is_group, _vtext, _vstyle)
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "✅ 语音已发送" if _vok else "❌ 语音发送失败"})
                 else:

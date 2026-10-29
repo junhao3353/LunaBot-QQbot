@@ -738,7 +738,7 @@
               <input type="text" class="form-control" id="model_breeze_model" placeholder="breeze-tts-2">
             </div>
             <div class="col-md-6">
-              <label class="form-label">Breeze 语气指令（可选）</label>
+              <label class="form-label">默认语气风格（可选，AI 可按场景覆盖）</label>
               <input type="text" class="form-control" id="model_breeze_instructions" placeholder="语气轻软、带点撒娇">
             </div>
             <div class="col-md-6">
@@ -1372,7 +1372,8 @@
         minimax_tts_vol: parseFloat(document.getElementById('model_minimax_tts_vol').value) || 1,
         minimax_tts_pitch: parseInt(document.getElementById('model_minimax_tts_pitch').value) || 0,
       };
-      await runSave(btn, API_BASE + '/api/config/model', data);
+      const _saved = await runSave(btn, API_BASE + '/api/config/model', data);
+      if (_saved) { try { await loadModel(); } catch (e) {} }
     }
 
     async function loadFeatures() {
