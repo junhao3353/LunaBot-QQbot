@@ -388,3 +388,9 @@ embedding_dim: 1024
   - 说说频率：程序侧限制间隔≥1小时、每天最多3条；提示词改成"一天1~3条、间隔1~3小时、有时一天不发、别当定时任务"
   - 文生图：MiniMax 换成千问 Qwen-Image（DashScope 同步接口 /api/v1/services/aigc/multimodal-generation/generation，用 embedding_api_key），去掉图生图/参考图能力（AI 只能纯文字生图，用户仍可用 /生成图片 指令）
   - 千问欠费时返回 400，会打印"可能是千问账号欠费/未充值"并降级为文字回复
+
+- 参考图生图（2026-10-30）：
+  - 新增「素材图」目录（宿主机 ./素材图 → 容器 /app/ref:ro），文件名=描述，像表情包一样让 AI 自选
+  - generate_image 新增 refs 参数（最多3张），走千问 Qwen-Image 多图输入（图在前、指令文字在后）
+  - 提示词要求 AI 不要重复描述参考图里已有的内容（选了"DeepSeek的全身图"就别再描述她的样子）
+  - 素材图目录 mtime 变化自动重扫，新增图片不用重启

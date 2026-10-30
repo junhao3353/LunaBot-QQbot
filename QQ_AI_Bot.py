@@ -366,7 +366,65 @@ ENABLE_IMAGE_TOOL = True         # 文生图AI工具总开关
 IMAGE_TOOL_RETURN_IMAGE = False  # 工具返回结果时是否把图片base64也带给AI(占token,默认关)
 _MAIN_LOOP = None  # 主事件循环引用,供同步线程(call_deepseek)提交协程执行OneBot
 _WS_REF = None     # 当前websocket连接引用
-_LAST_IMAGE_URLS = {}  # 各群/用户最近一张图片URL缓存,key=chat_id,供图生图工具使用
+_LAST_IMAGE_URLS = {}  # 各群/用户最近一张图片URL缓存,key=chat_id
+# 参考图素材库（和表情包一个逻辑：文件名=描述，AI 自己选）
+REF_IMAGE_DIR = None
+REF_IMAGE_MAP = {}
+_REF_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+
+_REF_DIR_MTIME = [0.0]
+
+
+def _maybe_rescan_ref():
+    """素材图目录有增删时自动重扫（不用重启）。"""
+    try:
+        _m = os.path.getmtime(REF_IMAGE_DIR) if REF_IMAGE_DIR and os.path.isdir(REF_IMAGE_DIR) else 0
+    except Exception:
+        _m = 0
+    if _m != _REF_DIR_MTIME[0]:
+        _REF_DIR_MTIME[0] = _m
+        scan_ref_dir()
+
+
+def scan_ref_dir():
+    """扫描素材图目录，建立 {名称: 路径}。"""
+    REF_IMAGE_MAP.clear()
+    if not REF_IMAGE_DIR or not os.path.isdir(REF_IMAGE_DIR):
+        return
+    for fname in os.listdir(REF_IMAGE_DIR):
+        ext = os.path.splitext(fname)[1].lower()
+        if ext in _REF_EXTS:
+            name = os.path.splitext(fname)[0].strip()
+            if name:
+                REF_IMAGE_MAP[name] = os.path.join(REF_IMAGE_DIR, fname)
+    if REF_IMAGE_MAP:
+        print(f"🖼️ 已加载{len(REF_IMAGE_MAP)}张参考图：{'、'.join(list(REF_IMAGE_MAP.keys())[:12])}"
+              f"{'…' if len(REF_IMAGE_MAP) > 12 else ''}")
+
+
+def _ref_data_urls(names):
+    """把参考图名转成 data URL 列表（最多3张）。"""
+    if not names:
+        return []
+    if isinstance(names, str):
+        names = [x.strip() for x in re.split(r"[,，、;；\s]+", names) if x.strip()]
+    out = []
+    import base64 as _b64
+    import mimetypes as _mt
+    for n in list(names)[:3]:
+        p = REF_IMAGE_MAP.get(str(n).strip())
+        if not p or not os.path.isfile(p):
+            print(f"⚠️ 参考图不存在：{n}")
+            continue
+        try:
+            with open(p, "rb") as f:
+                _raw = f.read()
+            _mime = _mt.guess_type(p)[0] or "image/png"
+            out.append(f"data:{_mime};base64," + _b64.b64encode(_raw).decode("utf-8"))
+        except Exception as e:
+            print(f"⚠️ 读取参考图失败 {n}: {e}")
+    return out
 EMOJI_DIR = None               # 表情包目录绝对路径（配置加载时确定）
 EMOJI_MAP = {}                 # 表情名(文件名去扩展名) -> 图片绝对路径
 _EMOJI_CAPTIONS = {}           # 表情名 -> 视觉模型看过后的画面描述（缓存，避免重复识别花钱）
@@ -5033,6 +5091,31 @@ def scan_emoji_dir():
               f"{'…' if len(EMOJI_MAP) > 12 else ''}")
 
 
+def _image_tool_def():
+    """文生图工具定义：有素材图时附带可选参考图列表。"""
+    _maybe_rescan_ref()
+    _refs_desc = ("可选：从素材库里选参考图（最多3张，数组里填名称）。"
+                  "图里的内容已经画进画面了，prompt 只描述要新增/改变/放置的部分，"
+                  "不要再重复描述参考图里已有的内容（比如选了「DeepSeek的全身图」，就别再描述她的发色、服装、体型）。")
+    props = {
+        "prompt": {"type": "string", "description": "要生成/修改的画面描述（越具体越好，中文即可）"},
+        "aspect_ratio": {"type": "string", "description": "比例：1:1默认，16:9横，9:16竖，4:3，3:4"},
+    }
+    if REF_IMAGE_MAP:
+        props["refs"] = {"type": "array", "items": {"type": "string"},
+                         "description": _refs_desc + "可选名称：" + "、".join(REF_IMAGE_MAP.keys())}
+    return {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": ("文生图/改图（千问 Qwen-Image）：按描述生成图片发到当前对话。"
+                            "有素材参考图时可以先选参考图，再描述要做什么（不要把参考图里已有的内容再描述一遍）。"
+                            "prompt 要具体：主体+环境+风格+光影+细节。"),
+            "parameters": {"type": "object", "properties": props, "required": ["prompt"]}
+        }
+    }
+
+
 def _sleep_tool_def():
     """睡觉工具：只在允许的时间窗外就不下发（由调用方控制）"""
     return {
@@ -5371,16 +5454,20 @@ _QWEN_IMAGE_SIZES = {
 }
 
 
-def _qwen_generate_image(prompt: str, aspect_ratio: str = "1:1"):
+def _qwen_generate_image(prompt: str, aspect_ratio: str = "1:1", refs=None):
     """调千问 Qwen-Image 生成图片，返回 base64 字符串（无 data: 前缀），失败返回 None。"""
     _key = (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY or "").strip()
     if not _key:
         print("⚠️ 未配置千问 API Key（embedding_api_key 或 image_api_key）")
         return None
     _size = _QWEN_IMAGE_SIZES.get(str(aspect_ratio or "1:1"), "2048*2048")
+    _content = [{"image": u} for u in _ref_data_urls(refs)]
+    _content.append({"text": prompt})
+    if len(_content) > 4:
+        _content = _content[-4:]
     payload = {
         "model": QWEN_IMAGE_MODEL or "qwen-image-2.0",
-        "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]},
+        "input": {"messages": [{"role": "user", "content": _content}]},
         "parameters": {"size": _size, "n": 1, "prompt_extend": True, "watermark": False,
                        "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，卡通化失真，画面过饱和，"
                                           "人脸无细节，过度光滑，AI感，构图混乱，文字模糊扭曲"},
@@ -5425,10 +5512,10 @@ def _qwen_generate_image(prompt: str, aspect_ratio: str = "1:1"):
         return None
 
 
-async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ratio: str = "1:1"):
+async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ratio: str = "1:1", refs=None):
     """生成图片并以base64图片消息发到群/私聊。返回 (成功bool, base64字符串或空)。"""
     import base64
-    b64 = await asyncio.to_thread(_qwen_generate_image, prompt, aspect_ratio)
+    b64 = await asyncio.to_thread(_qwen_generate_image, prompt, aspect_ratio, refs)
     if not b64:
         return False, ""
     # 去掉可能的data:前缀
@@ -5451,13 +5538,13 @@ async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ra
         return False, ""
 
 
-def _sync_generate_image(chat_id, is_group, prompt, aspect_ratio="1:1"):
+def _sync_generate_image(chat_id, is_group, prompt, aspect_ratio="1:1", refs=None):
     """同步执行文生图并发图(在call_deepseek工作线程里调用)。返回 (成功bool, base64)。"""
     if _MAIN_LOOP is None or _WS_REF is None:
         return False, ""
     try:
         fut = asyncio.run_coroutine_threadsafe(
-            _generate_and_send_image(_WS_REF, chat_id, is_group, prompt, aspect_ratio), _MAIN_LOOP)
+            _generate_and_send_image(_WS_REF, chat_id, is_group, prompt, aspect_ratio, refs), _MAIN_LOOP)
         return fut.result(timeout=120)
     except Exception as e:
         print(f"⚠️ 文生图同步执行异常: {e}")
@@ -5596,22 +5683,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             }
         })
     # 文生图工具:AI自主决定什么时候画图
-    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "generate_image",
-                "description": "文生图（千问 Qwen-Image）：按描述生成图片发到当前对话。prompt 要具体（主体+环境+风格+光影+细节），中文即可；画动漫角色要描述外貌特征，别只写名字。不支持参考图/图生图，群友发图让你模仿时，说明只能按文字重新画。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
-                        "aspect_ratio": {"type": "string", "description": "比例:1:1默认,16:9横,9:16竖,4:3,3:4"},
-                    },
-                    "required": ["prompt"]
-                }
-            }
-        })
+    if ENABLE_IMAGE_TOOL and (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY):
+        tools.append(_image_tool_def())
     if _sleep_now_ok():
         tools.append(_sleep_tool_def())
     if ENABLE_PROACTIVE_QZONE:
@@ -5701,7 +5774,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.add("group_moderation")  # 群管理仍只群聊用
     if ENABLE_VOICE_TOOL:
         _runnable_names.add("send_voice")
-    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+    if ENABLE_IMAGE_TOOL and (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY):
         _runnable_names.add("generate_image")
     if ENABLE_PROACTIVE_QZONE:
         _runnable_names.add("post_qzone")
@@ -5859,8 +5932,10 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                     _gprompt = ""
                     _gratio = MINIMAX_IMAGE_RATIO
                 if _gprompt:
-                    print(f"🖼️  AI调用文生图: [{_gratio}] {_gprompt[:60]}")
-                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio)
+                    _grefs = _gd.get("refs") or []
+                    print(f"🖼️  AI调用文生图: [{_gratio}] {_gprompt[:60]}"
+                          + (f" refs={_grefs}" if _grefs else ""))
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _grefs)
                     print(f"🖼️  文生图结果: {'成功' if _gok else '失败'}")
                     if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
                         _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
@@ -6199,22 +6274,8 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
             }
         })
     # 文生图工具
-    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "generate_image",
-                "description": "文生图（千问 Qwen-Image）：按描述生成图片发到当前对话。prompt 要具体（主体+环境+风格+光影+细节），中文即可；画动漫角色要描述外貌特征，别只写名字。不支持参考图/图生图，群友发图让你模仿时，说明只能按文字重新画。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
-                        "aspect_ratio": {"type": "string", "description": "图片比例,可选1:1(默认),16:9,9:16,4:3,3:4。用户提到横图/宽屏用16:9,竖图/手机壁纸用9:16,没说就用1:1"},
-                    },
-                    "required": ["prompt"]
-                }
-            }
-        })
+    if ENABLE_IMAGE_TOOL and (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY):
+        tools.append(_image_tool_def())
     if ENABLE_PROACTIVE_QZONE:
         tools.append({
             "type": "function",
@@ -6304,7 +6365,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         _runnable_names.add("group_moderation")
     if ENABLE_VOICE_TOOL:
         _runnable_names.add("send_voice")
-    if ENABLE_IMAGE_TOOL and MINIMAX_API_KEY:
+    if ENABLE_IMAGE_TOOL and (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY):
         _runnable_names.add("generate_image")
     if ENABLE_PROACTIVE_QZONE:
         _runnable_names.add("post_qzone")
@@ -6420,8 +6481,10 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                 except Exception:
                     _gprompt, _gratio = "", MINIMAX_IMAGE_RATIO
                 if _gprompt:
-                    print(f"🖼️ [视觉]AI调用文生图: [{_gratio}] {_gprompt[:60]}")
-                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio)
+                    _grefs = _gd.get("refs") or []
+                    print(f"🖼️ [视觉]AI调用文生图: [{_gratio}] {_gprompt[:60]}"
+                          + (f" refs={_grefs}" if _grefs else ""))
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _grefs)
                     if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
                         _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
                     else:
@@ -7643,6 +7706,8 @@ def _load_config_file():
     global QWEN_IMAGE_MODEL, QWEN_IMAGE_API_KEY
     QWEN_IMAGE_MODEL = s("qwen_image_model", QWEN_IMAGE_MODEL) or QWEN_IMAGE_MODEL
     QWEN_IMAGE_API_KEY = s("image_api_key", QWEN_IMAGE_API_KEY) or QWEN_IMAGE_API_KEY
+    global REF_IMAGE_DIR
+    REF_IMAGE_DIR = s("ref_image_dir", REF_IMAGE_DIR) or REF_IMAGE_DIR
     MINIMAX_IMAGE_MODEL = s("minimax_image_model", MINIMAX_IMAGE_MODEL)
     MINIMAX_IMAGE_RATIO = s("minimax_image_ratio", MINIMAX_IMAGE_RATIO)
     MINIMAX_PROMPT_OPTIMIZER = s("minimax_prompt_optimizer", MINIMAX_PROMPT_OPTIMIZER)
@@ -7658,6 +7723,13 @@ def _load_config_file():
         scan_emoji_dir()
         if not EMOJI_MAP:
             print(f"⚠️ 表情包已开启但目录无图片：{EMOJI_DIR}")
+    # 参考图素材库（生图时 AI 可自选，和表情包同款逻辑）
+    _ref_dir = os.environ.get("QQ2_REF_DIR") or s("ref_image_dir", "") or REF_IMAGE_DIR
+    if not _ref_dir:
+        _cand = os.path.join(script_dir, "素材图")
+        _ref_dir = _cand if os.path.isdir(_cand) else os.path.join(script_dir, "ref")
+    REF_IMAGE_DIR = _ref_dir
+    scan_ref_dir()
 
     # 视频识别开关
     ENABLE_VIDEO = b("enable_video", ENABLE_VIDEO)

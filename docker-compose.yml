@@ -47,6 +47,7 @@ services:
       - QQ2_MEMORY_DIR=/app/memory
       # AI表情包目录（宿主机"表情包"文件夹挂到容器/app/emoji，只读；文件名即表情描述）
       - QQ2_EMOJI_DIR=/app/emoji
+      - QQ2_REF_DIR=/app/ref
       # 抖音解析服务（独立容器 douyin_tiktok_download_api；在 .env 里填地址与Key）
       - QQ2_DOUYIN_API_BASE=${QQ2_DOUYIN_API_BASE:-}
       - QQ2_DOUYIN_API_KEY=${QQ2_DOUYIN_API_KEY:-}
@@ -57,6 +58,7 @@ services:
       - ./transfer:/deliver            # 与napcat共享的待传目录
       - ./memory:/app/memory           # 永久记忆存档目录（memory.json，重启不丢，可宿主机直接编辑）
       - ./表情包:/app/emoji:ro          # AI表情包目录（只读，文件名去扩展名=表情描述，AI自主选发）
+      - ./素材图:/app/ref:ro            # 参考图素材库（只读，文件名=描述，AI生图时自选参考图）
       - ./qqbot-config.yml:/app/qqbot-config.yml:ro   # 配置只读挂载（bot 不需要写；WebUI 在 controller 那边以读写挂载）
       - ./QQ_AI_Bot.py:/app/QQ_AI_Bot.py                  # 代码挂载：PyCharm改宿主机QQ_AI_Bot.py，容器实时同步，重启即生效（开发用，免build）
       - ./douyin_dtk.py:/app/douyin_dtk.py                # 抖音解析服务客户端（与主程序一起挂载，改完重启即生效）
