@@ -335,6 +335,7 @@ BREEZE_VOICE = ""              # 音色ID，如 voc_xeh3w54cqvnp（GET /v1/voice
 BREEZE_TTS_MODEL = "breeze-tts-2"   # 可留空由服务端自动选
 BREEZE_INSTRUCTIONS = ""       # 可选的语气指令，如"语气轻软、带点撒娇"
 BREEZE_BASE = "https://api.breeze.blue"
+TTS_TAIL_PAD = 1.2      # 语音末尾补静音秒数（QQ/NapCat 转码会吃掉最后一点音频）
 MINIMAX_TTS_SPEED = 1.0                   # 语速 0.5~2.0
 MINIMAX_TTS_VOL = 1.0                     # 音量 0~10
 MINIMAX_TTS_PITCH = 0                     # 音调 -12~12
@@ -3673,6 +3674,24 @@ async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str, styl
             import edge_tts
             communicate = edge_tts.Communicate(_tts_text, TTS_VOICE)
             await communicate.save(tmp)
+        # 尾部补静音：QQ/NapCat 把 mp3 转 silk 时偶尔吃掉结尾，补一段静音当缓冲
+        if TTS_TAIL_PAD > 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            try:
+                _pad_out = tmp + ".pad.mp3"
+                _pr = _run_subprocess(
+                    ["ffmpeg", "-y", "-i", tmp, "-af", f"apad=pad_dur={TTS_TAIL_PAD:.2f}",
+                     "-c:a", "libmp3lame", "-q:a", "4", _pad_out], timeout=60)
+                if _pr.returncode == 0 and os.path.isfile(_pad_out) and os.path.getsize(_pad_out) > 1024:
+                    os.replace(_pad_out, tmp)
+                    print(f"🔇 TTS 尾部补 {TTS_TAIL_PAD:.1f}s 静音")
+                else:
+                    print("⚠️ TTS 补静音失败，使用原始音频")
+                    try:
+                        os.remove(_pad_out)
+                    except Exception:
+                        pass
+            except Exception as _pe:
+                print(f"⚠️ TTS 补静音异常：{_pe}")
         if not os.path.isfile(tmp) or os.path.getsize(tmp) <= 0:
             print(f"⚠️ TTS合成结果为空，降级文本")
             return False
@@ -7727,6 +7746,11 @@ def _load_config_file():
     BREEZE_VOICE = s("breeze_voice", BREEZE_VOICE) or BREEZE_VOICE
     BREEZE_TTS_MODEL = s("breeze_model", BREEZE_TTS_MODEL) or BREEZE_TTS_MODEL
     BREEZE_INSTRUCTIONS = s("breeze_instructions", BREEZE_INSTRUCTIONS) or ""
+    global TTS_TAIL_PAD
+    try:
+        TTS_TAIL_PAD = float(s("tts_tail_pad_seconds", str(TTS_TAIL_PAD)) or TTS_TAIL_PAD)
+    except Exception:
+        pass
     global SLEEP_ENABLED, SLEEP_TOKEN, SLEEP_CONTROLLER_URL, SLEEP_FILE
     global SLEEP_MIN_HOURS, SLEEP_MAX_HOURS, SLEEP_WINDOW_START, SLEEP_WINDOW_END
     SLEEP_ENABLED = b("sleep_enabled", SLEEP_ENABLED)

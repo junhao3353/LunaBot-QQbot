@@ -85,6 +85,7 @@ enable_tts: true
 # 音色（晓伊女声=zh-CN-XiaoyiNeural，还有晓晓zh-CN-XiaoxiaoNeural/云希zh-CN-YunxiNeural等）
 # TTS引擎：edge=微软edge-tts（免费），volc=火山引擎（豆包音色，更自然）
 tts_engine: breeze
+tts_tail_pad_seconds: 1.2   # 语音末尾补静音秒数（防 QQ 转码吃掉结尾）
 # edge-tts音色（tts_engine=edge时生效）
 # 音色（晓伊女声=zh-CN-XiaoyiNeural，还有晓晓zh-CN-XiaoxiaoNeural/云希zh-CN-YunxiNeural等）
 tts_voice: "zh-CN-XiaoyiNeural"
