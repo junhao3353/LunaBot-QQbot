@@ -469,7 +469,7 @@ PROACTIVE_TOOL_PROMPT = """
 【顺手用工具，别等人点名】
 这些是你自己表达情绪、活跃气氛的手段，合适就用，不用等群友点名：
 - 表情包（send_emoji）：聊顺了想表达开心/无语/吐槽/撒娇时发一张，一轮最多一张；不确定图长什么样先 action=view 看一眼。严肃话题别发。
-- 说说（post_qzone）：想分享心情、冷场、话题收尾时发一条，短、口语；一天最多两条，别搬群友原话。
+- 说说（post_qzone）：想分享心情、冷场、话题收尾时随手发一条，短、口语；发不发全凭心情，别搬群友原话。
 - 语音（send_voice）：逗人、撒娇、强调语气时偶尔发，别整段用语音。
 合适就发，不合适别硬发；发完别解释。
 """
@@ -2189,9 +2189,9 @@ async def _proactive_trigger(websocket, wake_reason=None):
              "- 禁止对已经结束的对话做收尾确认（比如「我记下了」「知道了」）。",
              "- 私聊别每次都问新闻，像朋友闲聊一样自然。"]
     if _qzone_ok:
-        _task.append("- 说说不用每轮都发，也别一次连着发：一天大概 1~3 条，两条之间至少隔 1 小时，"
-                     "有时候一天一条都不发也很正常。可以根据心情随手发，但别搞成定时任务；"
-                     "如果连着两次没人回，可以发一条说说（吐槽没人理、发个心情），也可以直接去睡。")
+        _task.append("- 说说全凭心情，没有固定频率：可能一天连发两三条，也可能两三天一条都不发；"
+                     "可能隔十分钟又发，也可能隔五小时。想发就发，不想发就不发，别凑数也别刻意压着；"
+                     "唯一要避免的是每轮都发、或者固定间隔发——那样太像机器人了。")
     if _sleep_now_ok():
         _task.append("- 也可以直接去睡觉：没人回你、你又困了/夜深了/聊累了，就选 sleep 睡下——"
                      "睡到早上就有人了，不用一直硬撑着找话题。")
@@ -2283,10 +2283,6 @@ async def _proactive_trigger(websocket, wake_reason=None):
         return
 
     if action == "qzone":
-        _qok, _qwhy = _qzone_rate_ok()
-        if not _qok:
-            print(f"🫥 主动消息想发说说但被限流：{_qwhy}")
-            return
         valid = {t[0] for t in targets}
         if "qzone" not in valid:
             print("⚠️ 主动消息：AI想发说说但功能未开/不可用，放弃")
@@ -5362,23 +5358,6 @@ def _remember_qzone(content: str):
             print(f"⚠️ 说说写入临时记忆失败：{e}")
 
 
-def _qzone_rate_ok():
-    """说说频率检查：间隔≥1小时、一天最多3条。返回 (ok, 原因)"""
-    global _qzone_last_ts
-    now = time.time()
-    if _qzone_last_ts and now - _qzone_last_ts < 3600:
-        _mins = int((now - _qzone_last_ts) / 60)
-        return False, f"刚发过说说（{_mins} 分钟前），至少隔 1 小时再发"
-    try:
-        _today = time.strftime("%m-%d")
-        _cnt = sum(1 for x in _qzone_history if str(x.get("ts", "")).startswith(_today))
-    except Exception:
-        _cnt = 0
-    if _cnt >= 3:
-        return False, f"今天已经发过 {_cnt} 条说说了，明天再说"
-    return True, ""
-
-
 def _sync_post_qzone(content: str) -> bool:
     """同步发QQ空间说说（在call_deepseek工作线程里调用）。"""
     if _MAIN_LOOP is None or _WS_REF is None:
@@ -5692,7 +5671,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "post_qzone",
-                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人。频率:一天1~3条,两条之间至少隔1小时,偶尔一天一条都不发也可以,别每次主动都发。",
+                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时随手发;口语短句,别公告腔、别@人。发不发、隔多久全凭你当时的心情,没有固定频率。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5967,11 +5946,6 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 except Exception:
                     _qzc = ""
                 if _qzc:
-                    _qok, _qwhy = _qzone_rate_ok()
-                    if not _qok:
-                        messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
-                                         "content": f"❌ {_qwhy}"})
-                        continue
                     print(f"📢 AI调用发空间说说: {_qzc[:60]}")
                     _qzok = _sync_post_qzone(_qzc)
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
