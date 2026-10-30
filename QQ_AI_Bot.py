@@ -2127,13 +2127,19 @@ async def _proactive_trigger(websocket, wake_reason=None):
              "- 禁止对已经结束的对话做收尾确认（比如「我记下了」「知道了」）。",
              "- 私聊别每次都问新闻，像朋友闲聊一样自然。"]
     if _qzone_ok:
-        _task.append("- 发说说也是正常选项：没特别想跟谁说、或想分享心情/吐槽时，发一条说说（朋友圈动态）很自然。")
-    _task += ["- 真不想说话就 skip，但不要因为「怕没人回」就 skip。",
+        _task.append("- 发说说和发消息一样重要：大约每 3 次主动至少 1 次发说说。"
+                     "连着两次主动都没人回你时，别再发消息了，直接发一条说说（吐槽没人理、发个心情都行）。")
+    if _sleep_now_ok():
+        _task.append("- 也可以直接去睡觉：没人回你、你又困了/夜深了/聊累了，就选 sleep 睡下——"
+                     "睡到早上就有人了，不用一直硬撑着找话题。")
+    _task += ["- 真不想说话就 skip，但不要因为「怕没人回」就 skip；没人回的时候可以发说说或者睡觉。",
               "",
               "只输出 JSON：",
               "  发群/私聊：{\"action\":\"send\",\"target_type\":\"group或private\",\"target_id\":数字ID,\"messages\":[\"第一句\"]或[\"第一句\",\"第二句\"]}"]
     if _qzone_ok:
         _task.append("  发空间说说：{\"action\":\"qzone\",\"message\":\"说说内容（像朋友圈一句话，不要@谁）\"}")
+    if _sleep_now_ok():
+        _task.append("  去睡觉：{\"action\":\"sleep\",\"reason\":\"没人回，困了\",\"message\":\"可选，睡前想说的话\",\"target_type\":\"可选private/group\",\"target_id\":可选数字}")
     if ENABLE_WEB_SEARCH:
         _task.append("  要联网找话题：{\"action\":\"search\",\"query\":\"搜索关键词\"}")
     _task.append("  不想发：{\"action\":\"skip\",\"reason\":\"原因\"}")
@@ -2195,6 +2201,24 @@ async def _proactive_trigger(websocket, wake_reason=None):
     message = messages_to_send[0]  # 兼容下面 qzone 分支
 
     # 发空间说说
+    if action == "sleep":
+        if not _sleep_now_ok():
+            print("🫥 主动消息想睡觉，但不在允许时间段，跳过")
+            return
+        _sreason = str(decision.get("reason") or "没人回，去睡了")[:100]
+        _sgn = str(decision.get("message") or "").strip()
+        _stt = str(decision.get("target_type") or "").strip()
+        try:
+            _stid = int(decision.get("target_id") or 0)
+        except Exception:
+            _stid = 0
+        if _stt in ("private", "group") and _stid:
+            _sres = _sync_sleep(_stt == "group", _stid, _sreason, _sgn)
+        else:
+            _sres = _sync_sleep(False, 0, _sreason, "")
+        print(f"😴 主动消息决定睡觉：{_sres}")
+        return
+
     if action == "qzone":
         valid = {t[0] for t in targets}
         if "qzone" not in valid:
@@ -5005,8 +5029,10 @@ def _sleep_tool_def():
         "type": "function",
         "function": {
             "name": "sleep",
-            "description": ("去睡觉：你会下线（NapCat 和主程序都停），随机 8~10 小时后自动醒来。"
-                            "只在群友明确说晚安/让你去睡，或你自己真的困了要睡时用；每天最多一次。"),
+            "description": ("去睡觉：你会下线（NapCat 和主程序都停），随机 8~10 小时后自动醒来，"
+                            "醒来就有'早上有人了'的新鲜感。满足任意一条就睡：对方说晚安/让你去睡、"
+                            "夜深了、你困了、聊累了、没人理你、想歇一会儿。不用等明确命令，也不用反复确认；"
+                            "一天最多一次。"),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -5546,7 +5572,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "post_qzone",
-                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人;一天最多两条。",
+                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人;一天最多三条。",
                 "parameters": {
                     "type": "object",
                     "properties": {
