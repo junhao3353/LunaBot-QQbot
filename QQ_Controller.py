@@ -593,6 +593,7 @@ def _get_model_config():
         "embedding_model": cfg.get("embedding_model", "qwen3.7-text-embedding"),
         "embedding_dim": cfg.get("embedding_dim", 1024),
         "minimax_image_model": cfg.get("minimax_image_model", "image-01"),
+        "qwen_image_model": cfg.get("qwen_image_model", "qwen-image-2.0"),
         "minimax_image_ratio": cfg.get("minimax_image_ratio", "1:1"),
         "enable_image_command": cfg.get("enable_image_command", True),
         "enable_image_tool": cfg.get("enable_image_tool", True),
@@ -718,6 +719,7 @@ def _save_model_config(data):
             cfg["embedding_dim"] = _clamp_int(data["embedding_dim"], 256, 2560, 1024)
             changed = True
         if "minimax_image_model" in data: cfg["minimax_image_model"] = str(data["minimax_image_model"]); changed = True
+        if "qwen_image_model" in data: cfg["qwen_image_model"] = str(data["qwen_image_model"]).strip() or "qwen-image-2.0"; changed = True
         if "minimax_image_ratio" in data:
             r = str(data["minimax_image_ratio"])
             cfg["minimax_image_ratio"] = r if r in ("1:1", "16:9", "9:16", "4:3", "3:4") else "1:1"

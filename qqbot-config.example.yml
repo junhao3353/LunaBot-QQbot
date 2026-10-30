@@ -214,6 +214,7 @@ proactive_active_protect: 300
 # MiniMax API Key（敏感：WebUI 不回显；推荐用环境变量 MINIMAX_API_KEY 或不提交本文件）
 minimax_api_key: ""
 minimax_image_model: "image-01"
+qwen_image_model: "qwen-image-2.0"
 minimax_image_ratio: "1:1"
 # MiniMax prompt 自动优化（true/false）
 minimax_prompt_optimizer: false

@@ -354,7 +354,11 @@ ENABLE_GROUP_MODERATION = True  # 群管理工具(禁言/踢人/全员禁言)总
 ENABLE_VOICE_TOOL = True       # 文字转语音工具总开关:AI自主决定什么时候发语音条
 MINIMAX_API_KEY = ""            # MiniMax API Key(文生图)
 REF_IMAGE_MAX_MB = 8            # 图生图参考图下载上限（MB），防 SSRF/内存放大
-MINIMAX_IMAGE_MODEL = "image-01" # MiniMax文生图模型
+MINIMAX_IMAGE_MODEL = "image-01" # （已废弃：文生图改用千问）
+# 千问 Qwen-Image 文生图（DashScope 原生接口，同步）
+QWEN_IMAGE_MODEL = "qwen-image-2.0"
+QWEN_IMAGE_API_KEY = ""                 # 留空则用 embedding_api_key（同一个千问 key）
+QWEN_IMAGE_BASE = "https://dashscope.aliyuncs.com"
 MINIMAX_IMAGE_RATIO = "1:1"      # 默认图片比例
 MINIMAX_PROMPT_OPTIMIZER = False  # MiniMax prompt自动优化开关
 ENABLE_IMAGE_COMMAND = True      # /生成图片 命令总开关
@@ -2127,8 +2131,9 @@ async def _proactive_trigger(websocket, wake_reason=None):
              "- 禁止对已经结束的对话做收尾确认（比如「我记下了」「知道了」）。",
              "- 私聊别每次都问新闻，像朋友闲聊一样自然。"]
     if _qzone_ok:
-        _task.append("- 发说说和发消息一样重要：大约每 3 次主动至少 1 次发说说。"
-                     "连着两次主动都没人回你时，别再发消息了，直接发一条说说（吐槽没人理、发个心情都行）。")
+        _task.append("- 说说不用每轮都发，也别一次连着发：一天大概 1~3 条，两条之间至少隔 1 小时，"
+                     "有时候一天一条都不发也很正常。可以根据心情随手发，但别搞成定时任务；"
+                     "如果连着两次没人回，可以发一条说说（吐槽没人理、发个心情），也可以直接去睡。")
     if _sleep_now_ok():
         _task.append("- 也可以直接去睡觉：没人回你、你又困了/夜深了/聊累了，就选 sleep 睡下——"
                      "睡到早上就有人了，不用一直硬撑着找话题。")
@@ -2220,6 +2225,10 @@ async def _proactive_trigger(websocket, wake_reason=None):
         return
 
     if action == "qzone":
+        _qok, _qwhy = _qzone_rate_ok()
+        if not _qok:
+            print(f"🫥 主动消息想发说说但被限流：{_qwhy}")
+            return
         valid = {t[0] for t in targets}
         if "qzone" not in valid:
             print("⚠️ 主动消息：AI想发说说但功能未开/不可用，放弃")
@@ -2296,6 +2305,7 @@ async def _proactive_trigger(websocket, wake_reason=None):
 _wake_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_wake.json")
 _wake_pending = []   # [{"ts": float, "user_qq": int, "mode": "direct"|"prompt", "content": str}]
 _qzone_history = []   # 最近发过的说说内容（防止重复话题）
+_qzone_last_ts = 0.0   # 上次发说说的 Unix 时间（频率控制）
 _qzone_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qzone_history.json")
 QZONE_HISTORY_COUNT = 8   # 带上最近N条说说
 
@@ -5269,6 +5279,23 @@ def _remember_qzone(content: str):
             print(f"⚠️ 说说写入临时记忆失败：{e}")
 
 
+def _qzone_rate_ok():
+    """说说频率检查：间隔≥1小时、一天最多3条。返回 (ok, 原因)"""
+    global _qzone_last_ts
+    now = time.time()
+    if _qzone_last_ts and now - _qzone_last_ts < 3600:
+        _mins = int((now - _qzone_last_ts) / 60)
+        return False, f"刚发过说说（{_mins} 分钟前），至少隔 1 小时再发"
+    try:
+        _today = time.strftime("%m-%d")
+        _cnt = sum(1 for x in _qzone_history if str(x.get("ts", "")).startswith(_today))
+    except Exception:
+        _cnt = 0
+    if _cnt >= 3:
+        return False, f"今天已经发过 {_cnt} 条说说了，明天再说"
+    return True, ""
+
+
 def _sync_post_qzone(content: str) -> bool:
     """同步发QQ空间说说（在call_deepseek工作线程里调用）。"""
     if _MAIN_LOOP is None or _WS_REF is None:
@@ -5281,6 +5308,8 @@ def _sync_post_qzone(content: str) -> bool:
         r = fut.result(timeout=20)
         ok = r.get("retcode") == 0
         if ok:
+            global _qzone_last_ts
+            _qzone_last_ts = time.time()
             _remember_qzone(content)
             print(f"📢 说说已记录，历史共{len(_qzone_history)}条")
         return ok
@@ -5333,54 +5362,73 @@ def _download_image_to_base64(url: str, timeout: int = 30) -> str:
         return ""
 
 
-def _minimax_generate_image(prompt: str, aspect_ratio: str = "1:1", reference_image: str = ""):
-    """调MiniMax image-01生成图片,返回base64字符串(无data:前缀),失败返回None。reference_image为参考图URL(图生图)。"""
-    if not MINIMAX_API_KEY:
-        print("⚠️ MiniMax API Key未配置")
+_QWEN_IMAGE_SIZES = {
+    "1:1": "2048*2048",
+    "16:9": "2688*1536",
+    "9:16": "1536*2688",
+    "4:3": "2368*1728",
+    "3:4": "1728*2368",
+}
+
+
+def _qwen_generate_image(prompt: str, aspect_ratio: str = "1:1"):
+    """调千问 Qwen-Image 生成图片，返回 base64 字符串（无 data: 前缀），失败返回 None。"""
+    _key = (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY or "").strip()
+    if not _key:
+        print("⚠️ 未配置千问 API Key（embedding_api_key 或 image_api_key）")
         return None
-    import requests
-    url = "https://api.minimax.cn/v1/image_generation"
-    headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": MINIMAX_IMAGE_MODEL, "prompt": prompt,
-               "aspect_ratio": aspect_ratio, "response_format": "base64",
-               "prompt_optimizer": MINIMAX_PROMPT_OPTIMIZER}
-    if reference_image:
-        # URL就下载转base64(QQ图片链接外部访问不到),已经是base64就直接用
-        if reference_image.startswith("http"):
-            reference_image = _download_image_to_base64(reference_image)
-        if reference_image:
-            payload["subject_reference"] = [{"type": "character", "image_file": reference_image}]
-            print(f"🖼️  图生图参考(已转base64, {len(reference_image)}字节)")
-        else:
-            print("⚠️  参考图下载失败，退化为纯文生图")
+    _size = _QWEN_IMAGE_SIZES.get(str(aspect_ratio or "1:1"), "2048*2048")
+    payload = {
+        "model": QWEN_IMAGE_MODEL or "qwen-image-2.0",
+        "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]},
+        "parameters": {"size": _size, "n": 1, "prompt_extend": True, "watermark": False,
+                       "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，卡通化失真，画面过饱和，"
+                                          "人脸无细节，过度光滑，AI感，构图混乱，文字模糊扭曲"},
+    }
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        # 先检查生成是否失败（API调用成功但图片生成失败，通常是内容安全审核）
-        _meta = data.get("metadata", {})
-        _success = int(_meta.get("success_count", "0") or 0)
-        _failed = int(_meta.get("failed_count", "0") or 0)
-        if _failed > 0 or _success == 0:
-            print(f"⚠️ MiniMax图片生成失败: success={_success}, failed={_failed}（可能是内容安全审核不通过或参考图无法识别）")
+        r = requests.post(f"{QWEN_IMAGE_BASE}/api/v1/services/aigc/multimodal-generation/generation",
+                          headers={"Authorization": f"Bearer {_key}", "Content-Type": "application/json"},
+                          json=payload, timeout=180)
+        if r.status_code != 200:
+            try:
+                _e = r.json()
+                _code = _e.get("code") or ""
+                _msg = _e.get("message") or ""
+            except Exception:
+                _code, _msg = "", (r.text or "")[:200]
+            print(f"⚠️ 千问生图失败 HTTP {r.status_code}：{_code} {_msg}")
+            if r.status_code in (401, 403) or "Arrear" in _code or "欠费" in _msg:
+                print("   （可能是千问账号欠费/未充值）")
             return None
-        # base64返回: data.image_base64 是数组
-        b64_list = data.get("data", {}).get("image_base64") or data.get("data", {}).get("images") or []
-        if b64_list and isinstance(b64_list, list):
-            return b64_list[0]
-        if isinstance(b64_list, str):
-            return b64_list
-        print(f"⚠️ MiniMax返回格式异常: {str(data)[:200]}")
-        return None
+        data = r.json() or {}
+        _url = ""
+        try:
+            _url = data["output"]["choices"][0]["message"]["content"][0]["image"]
+        except Exception:
+            _content = (((data.get("output") or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or []
+            for item in _content:
+                if isinstance(item, dict) and item.get("image"):
+                    _url = item["image"]
+                    break
+        if not _url:
+            print(f"⚠️ 千问生图返回无图片：{str(data)[:200]}")
+            return None
+        # 下载图片转 base64（链接 24 小时过期）
+        ir = requests.get(_url, timeout=120)
+        if ir.status_code != 200 or not ir.content:
+            print(f"⚠️ 千问图片下载失败 HTTP {ir.status_code}")
+            return None
+        import base64 as _b64
+        return _b64.b64encode(ir.content).decode("utf-8")
     except Exception as e:
-        print(f"⚠️ MiniMax文生图异常: {e}")
+        print(f"⚠️ 千问生图异常：{e}")
         return None
 
 
-async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ratio: str = "1:1", reference_image: str = ""):
+async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ratio: str = "1:1"):
     """生成图片并以base64图片消息发到群/私聊。返回 (成功bool, base64字符串或空)。"""
     import base64
-    b64 = await asyncio.to_thread(_minimax_generate_image, prompt, aspect_ratio, reference_image)
+    b64 = await asyncio.to_thread(_qwen_generate_image, prompt, aspect_ratio)
     if not b64:
         return False, ""
     # 去掉可能的data:前缀
@@ -5403,13 +5451,13 @@ async def _generate_and_send_image(ws, chat_id, is_group, prompt: str, aspect_ra
         return False, ""
 
 
-def _sync_generate_image(chat_id, is_group, prompt, aspect_ratio="1:1", reference_image=""):
+def _sync_generate_image(chat_id, is_group, prompt, aspect_ratio="1:1"):
     """同步执行文生图并发图(在call_deepseek工作线程里调用)。返回 (成功bool, base64)。"""
     if _MAIN_LOOP is None or _WS_REF is None:
         return False, ""
     try:
         fut = asyncio.run_coroutine_threadsafe(
-            _generate_and_send_image(_WS_REF, chat_id, is_group, prompt, aspect_ratio, reference_image), _MAIN_LOOP)
+            _generate_and_send_image(_WS_REF, chat_id, is_group, prompt, aspect_ratio), _MAIN_LOOP)
         return fut.result(timeout=120)
     except Exception as e:
         print(f"⚠️ 文生图同步执行异常: {e}")
@@ -5553,13 +5601,12 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "generate_image",
-                "description": "文生图:按描述生成图片发到当前对话。prompt要具体(主体+环境+风格+光影+细节),越细越好;可用英文质量词(8k, masterpiece, photorealistic, anime style等)。画动漫角色要描述外貌特征,别只写名字。群友发图要求参考/模仿风格时 use_reference=true。",
+                "description": "文生图（千问 Qwen-Image）：按描述生成图片发到当前对话。prompt 要具体（主体+环境+风格+光影+细节），中文即可；画动漫角色要描述外貌特征，别只写名字。不支持参考图/图生图，群友发图让你模仿时，说明只能按文字重新画。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
                         "aspect_ratio": {"type": "string", "description": "比例:1:1默认,16:9横,9:16竖,4:3,3:4"},
-                        "use_reference": {"type": "boolean", "description": "true=参考最近一张图(图生图),默认false"}
                     },
                     "required": ["prompt"]
                 }
@@ -5572,7 +5619,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "post_qzone",
-                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人;一天最多三条。",
+                "description": "发一条QQ空间说说。想分享日常/吐槽/心情、冷场或话题收尾时主动发;口语短句,别公告腔、别@人。频率:一天1~3条,两条之间至少隔1小时,偶尔一天一条都不发也可以,别每次主动都发。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5812,13 +5859,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                     _gprompt = ""
                     _gratio = MINIMAX_IMAGE_RATIO
                 if _gprompt:
-                    _use_ref = bool(_gd.get("use_reference", False))
-                    # AI明确要求用参考图时,从缓存取当前群/用户最近一张图片
-                    _gref = _LAST_IMAGE_URLS.get(obj_id, "") if _use_ref else ""
-                    if _use_ref and not _gref:
-                        print("⚠️  AI要求参考图但最近消息无图片缓存")
-                    print(f"🖼️  AI调用文生图: [{_gratio}] {_gprompt[:60]}" + (f" ref=自动拉取最近图片" if _gref else " (纯文生图)"))
-                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _gref)
+                    print(f"🖼️  AI调用文生图: [{_gratio}] {_gprompt[:60]}")
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio)
                     print(f"🖼️  文生图结果: {'成功' if _gok else '失败'}")
                     if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
                         _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
@@ -5850,6 +5892,11 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 except Exception:
                     _qzc = ""
                 if _qzc:
+                    _qok, _qwhy = _qzone_rate_ok()
+                    if not _qok:
+                        messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                         "content": f"❌ {_qwhy}"})
+                        continue
                     print(f"📢 AI调用发空间说说: {_qzc[:60]}")
                     _qzok = _sync_post_qzone(_qzc)
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
@@ -6157,13 +6204,12 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
             "type": "function",
             "function": {
                 "name": "generate_image",
-                "description": "文生图工具:根据文字描述生成图片并发到当前对话。当群友要求画图/生成图片/画个xxx,或你觉得用图片回复更合适时调用。调用后工具会生成并发送图片,返回成功/失败结果,你仍然可以同时文字回复。【prompt写法】一定要写详细:主体+环境+风格+光影+细节,不要只写'一只猫'这种潦草描述,越详细生成越准确。建议用英文写prompt(风格词质量词用英文效果更好),中英文混合也可。质量词(通用建议总是加):masterpiece, best quality, ultra detailed, highly detailed。风格词(按需选择不要乱加):二次元/动漫用anime style, cel shading, clean lineart, flat colors, no 3D render, no realistic;写实/照片用photorealistic, realistic, 8k, DSLR photo;海报/插画用poster design, illustration, graphic design;素描/手绘用pencil sketch, graphite drawing, monochrome。生成已知动漫/游戏角色时必须详细描述发色发型眼睛服装配饰等特征,不要只写角色名(模型不认识具体角色)。例如:'一只橘猫坐在窗台上,午后阳光洒进来,暖色调,电影感,8k高清'。【图生图】当群友发了图片并要求'按这个画/参考这张图/模仿这个风格'时,把use_reference设为true,工具会自动拉取最近一张图片作为参考图(保持人物/主体特征);没发图或不需要参考就不填。用参考图时prompt里也要描述角色(如'图中的蓝发少女站在海边'),只写场景不会把人画进去。不要频繁调用。",
+                "description": "文生图（千问 Qwen-Image）：按描述生成图片发到当前对话。prompt 要具体（主体+环境+风格+光影+细节），中文即可；画动漫角色要描述外貌特征，别只写名字。不支持参考图/图生图，群友发图让你模仿时，说明只能按文字重新画。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "prompt": {"type": "string", "description": "图片描述(越详细越好,中文英文均可)"},
                         "aspect_ratio": {"type": "string", "description": "图片比例,可选1:1(默认),16:9,9:16,4:3,3:4。用户提到横图/宽屏用16:9,竖图/手机壁纸用9:16,没说就用1:1"},
-                        "use_reference": {"type": "boolean", "description": "是否用参考图(图生图)。群友发了图片要求参考时设为true,工具自动拉取最近一张图片;没发图或不需要参考就不填(默认false)"}
                     },
                     "required": ["prompt"]
                 }
@@ -6371,15 +6417,11 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                     _gd = json.loads(tool_call["function"]["arguments"])
                     _gprompt = str(_gd.get("prompt", "")).strip()
                     _gratio = str(_gd.get("aspect_ratio") or MINIMAX_IMAGE_RATIO).strip()
-                    _use_ref = bool(_gd.get("use_reference", False))
                 except Exception:
-                    _gprompt, _gratio, _use_ref = "", MINIMAX_IMAGE_RATIO, False
+                    _gprompt, _gratio = "", MINIMAX_IMAGE_RATIO
                 if _gprompt:
-                    _gref = _LAST_IMAGE_URLS.get(obj_id, "") if _use_ref else ""
-                    if _use_ref and not _gref:
-                        print("⚠️ [视觉]AI要求参考图但无图片缓存")
-                    print(f"🖼️ [视觉]AI调用文生图: [{_gratio}] {_gprompt[:60]}" + (f" ref=自动拉取" if _gref else " (纯文生图)"))
-                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio, _gref)
+                    print(f"🖼️ [视觉]AI调用文生图: [{_gratio}] {_gprompt[:60]}")
+                    _gok, _gb64 = _sync_generate_image(obj_id, is_group, _gprompt, _gratio)
                     if _gok and IMAGE_TOOL_RETURN_IMAGE and _gb64:
                         _gresult = f"✅ 图片已生成并发送。图片base64(data:image/png;base64,{_gb64[:200]}...)"
                     else:
@@ -7027,17 +7069,14 @@ async def main():
                                 await send_private_msg(ws, chat_id, _tip)
                         else:
                             _use_ratio = _ratio or MINIMAX_IMAGE_RATIO
-                            # 消息里带图片就用最后一张作为参考图(图生图)
-                            _cmd_imgs = extract_images_from_message(cq_msg)
-                            _ref_img = _cmd_imgs[-1] if _cmd_imgs else ""
-                            _wait = f"正在生成图片（{_use_ratio}），稍等..." + ("（已带参考图）" if _ref_img else "")
+                            _wait = f"正在生成图片（{_use_ratio}），稍等..."
                             if is_group:
                                 await send_group_msg(ws, chat_id, _wait)
                             else:
                                 await send_private_msg(ws, chat_id, _wait)
-                            _ok, _ = await _generate_and_send_image(ws, chat_id, is_group, _prompt, _use_ratio, _ref_img)
+                            _ok, _ = await _generate_and_send_image(ws, chat_id, is_group, _prompt, _use_ratio)
                             if not _ok:
-                                _fail = "图片生成失败，请检查MiniMax API Key或稍后重试"
+                                _fail = "图片生成失败，请检查千问 API Key/额度，或稍后重试"
                                 if is_group:
                                     await send_group_msg(ws, chat_id, _fail)
                                 else:
@@ -7601,6 +7640,9 @@ def _load_config_file():
     ENABLE_GROUP_MODERATION = b("enable_group_moderation", ENABLE_GROUP_MODERATION)
     ENABLE_VOICE_TOOL = b("enable_voice_tool", ENABLE_VOICE_TOOL)
     MINIMAX_API_KEY = s("minimax_api_key", MINIMAX_API_KEY)
+    global QWEN_IMAGE_MODEL, QWEN_IMAGE_API_KEY
+    QWEN_IMAGE_MODEL = s("qwen_image_model", QWEN_IMAGE_MODEL) or QWEN_IMAGE_MODEL
+    QWEN_IMAGE_API_KEY = s("image_api_key", QWEN_IMAGE_API_KEY) or QWEN_IMAGE_API_KEY
     MINIMAX_IMAGE_MODEL = s("minimax_image_model", MINIMAX_IMAGE_MODEL)
     MINIMAX_IMAGE_RATIO = s("minimax_image_ratio", MINIMAX_IMAGE_RATIO)
     MINIMAX_PROMPT_OPTIMIZER = s("minimax_prompt_optimizer", MINIMAX_PROMPT_OPTIMIZER)
