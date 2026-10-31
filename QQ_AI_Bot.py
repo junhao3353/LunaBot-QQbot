@@ -1630,7 +1630,8 @@ _EMO_HARSH = {"笨": 2, "蠢": 3, "傻": 2, "废物": 4, "垃圾": 4, "闭嘴": 
 _EMO_APOLOGY = ("对不起", "抱歉", "我错了", "是我不好", "别生气", "原谅我", "我刚才过分",
                 "说话重了", "不该说", "我道歉", "误会你")
 _EMO_WARM = ("谢谢", "谢啦", "喜欢你", "爱你", "想你", "抱抱", "辛苦", "厉害", "可爱",
-             "乖", "心疼", "别难过", "我在", "夸你", "你最", "好孩子")
+             "乖", "心疼", "别难过", "我在", "夸你", "你最", "好孩子", "真好", "好棒",
+             "太好了", "听话", "乖乖")
 _EMO_SAD = ("难过", "伤心", "想哭", "哭了", "崩溃", "抑郁", "失落", "委屈", "心里难受",
             "好累", "累死", "撑不住", "emo", "不想活", "没意思")
 _EMO_ANXIOUS = ("焦虑", "紧张", "害怕", "担心", "慌", "压力大", "睡不着", "失眠", "怕")
@@ -1707,6 +1708,7 @@ def _emo_detect(text: str) -> dict:
 
 
 def _emo_tick(now=None):
+    """时间演化：小事自然淡去，大事才升级；修好了直接消失（不留痕）。"""
     now = float(now or time.time())
     try:
         with _emo_lock:
@@ -1720,17 +1722,29 @@ def _emo_tick(now=None):
                 aff["updated"] = now
             for uid, kn in list(_emo_state.get("knots", {}).items()):
                 st = str(kn.get("state") or "")
+                sev = int(kn.get("severity") or 3)
+                warm = int(kn.get("warm") or 0)
                 age = now - float(kn.get("since") or now)
-                if st == "hurt" and age > 24 * 3600:
-                    kn["state"], kn["since"] = "cold", now
-                elif st == "cold" and age > 48 * 3600:
-                    kn["state"], kn["since"] = "withdrawing", now
-                elif st == "withdrawing" and age > 72 * 3600:
-                    kn["state"], kn["resolved"] = "scar", now
-                    kn["since"] = now
-                elif st == "repairing" and age > 6 * 3600 and int(kn.get("warm") or 0) >= 2:
-                    kn["state"], kn["resolved"] = "scar", now
-                    kn["since"] = now
+                if st == "hurt":
+                    # 小事：聊着聊着就过去了（1 句暖话或 4 小时），不留痕
+                    if sev <= 3 and ((age > 4 * 3600 and warm >= 1) or age > 12 * 3600):
+                        _emo_state["knots"].pop(uid, None)
+                        continue
+                    if sev >= 4 and age > 24 * 3600:
+                        kn["state"], kn["since"] = "cold", now
+                elif st == "cold":
+                    _limit = 24 * 3600 if sev >= 4 else 48 * 3600
+                    if age > _limit:
+                        kn["state"], kn["since"] = "withdrawing", now
+                elif st == "withdrawing":
+                    _cap = 72 * 3600 if sev >= 5 else 96 * 3600
+                    if age > _cap:
+                        kn["state"], kn["resolved"], kn["since"] = "scar", now, now
+                elif st == "repairing":
+                    _need = 2 * 3600 if sev <= 3 else 6 * 3600
+                    if age > _need and warm >= 2:
+                        _emo_state["knots"].pop(uid, None)   # 真好了，不留痕
+                        continue
                 elif st == "scar" and age > 3 * 86400:
                     _emo_state["knots"].pop(uid, None)
             for uid, m in list(_emo_state.get("moods", {}).items()):
@@ -1747,7 +1761,8 @@ def _emo_clamp(x, lo=-1.0, hi=1.0):
 
 
 def _emo_observe(user_id, text):
-    """每条用户消息调用：更新 AI 情绪/心结/用户情绪。"""
+    """每条用户消息调用：更新 AI 情绪/心结/用户情绪。
+    规则：玩笑/打闹不结心结；小刺只掉心情不结仇；大伤才进入状态机。"""
     if not EMOTION_ENABLED:
         return
     try:
@@ -1756,30 +1771,46 @@ def _emo_observe(user_id, text):
         return
     det = _emo_detect(text)
     now = time.time()
+    _sens = max(0.2, float(EMOTION_SENSITIVITY or 1.0))
     with _emo_lock:
         _emo_tick(now)
         aff = _emo_state.setdefault("affect", {"v": 0.0, "a": 0.0, "updated": 0.0})
-        kn = _emo_state.get("knots", {}).get(uid)
+        recent = _emo_state.setdefault("recent", {}).setdefault(uid, [])
+        # 玩笑判断：本条有笑/“开玩笑”，或近 5 分钟刚有过暖互动
+        _t = str(text or "")
+        _banter = any(k in _t for k in ("哈哈", "hhh", "嘿嘿", "笑死", "开玩笑", "逗你", "玩梗", "别当真", "开个玩笑"))
+        if not _banter and int(det.get("severity") or 0) <= 3:
+            if any(r.get("tone") in ("warm", "banter") and now - float(r.get("ts") or 0) < 300
+                   for r in recent[-3:]):
+                _banter = True
         sev = int(det.get("severity") or 0)
-        _sens = max(0.2, float(EMOTION_SENSITIVITY or 1.0))
+        if _banter and det.get("tone") == "harsh":
+            det["tone"] = "banter"
+            sev = 0
+        kn = _emo_state.get("knots", {}).get(uid)
         if det.get("tone") == "harsh":
             aff["v"] = _emo_clamp(float(aff.get("v") or 0) - 0.18 * sev * _sens)
             aff["a"] = _emo_clamp(float(aff.get("a") or 0) + 0.10 * sev * _sens)
+            _harsh_today = sum(1 for r in recent if r.get("tone") == "harsh" and now - float(r.get("ts") or 0) < 86400)
             if kn:
-                if sev >= 4 or kn.get("state") in ("cold", "withdrawing"):
-                    kn["state"] = "withdrawing" if sev >= 4 else "cold"
-                elif sev >= 2:
+                if sev >= 4:
+                    kn["state"] = "withdrawing"
+                elif sev >= 3:
+                    kn["state"] = "cold"
+                elif sev >= 2 and kn.get("state") == "hurt":
                     kn["state"] = "hurt"
                 kn["severity"] = max(int(kn.get("severity") or 0), sev)
                 kn["last"] = now
-                kn["since"] = now if kn.get("state") != "scar" else kn.get("since")
-            elif sev >= 2:
+                kn["since"] = now
+            elif sev >= 3 or (sev == 2 and _harsh_today >= 1):
                 _emo_state.setdefault("knots", {})[uid] = {
-                    "user": int(uid), "cause": str(text or "").strip()[:60],
-                    "severity": sev, "state": "cold" if sev >= 4 else "hurt",
+                    "user": int(uid), "cause": _t.strip()[:60], "severity": sev,
+                    "state": "cold" if sev >= 4 else "hurt",
                     "since": now, "last": now, "warm": 0, "resolved": None,
                 }
-                print(f"💔 心结产生：{uid} 说「{str(text)[:30]}」（{sev}级）")
+                print(f"💔 心结产生：{uid} 说「{_t[:30]}」（{sev}级）")
+            elif sev >= 2:
+                print(f"😐 被刺了一下（{sev}级，不结心结）：{_t[:30]}")
         elif det.get("apology") and kn:
             kn["state"] = "repairing"
             kn["warm"] = int(kn.get("warm") or 0) + 1
@@ -1789,7 +1820,8 @@ def _emo_observe(user_id, text):
         elif det.get("tone") == "warm" and kn:
             kn["warm"] = int(kn.get("warm") or 0) + 1
             kn["last"] = now
-            if kn.get("state") == "hurt" and int(kn.get("warm") or 0) >= 3:
+            _sev = int(kn.get("severity") or 3)
+            if int(kn.get("warm") or 0) >= (2 if _sev <= 3 else 3):
                 kn["state"], kn["since"] = "repairing", now
             aff["v"] = _emo_clamp(float(aff.get("v") or 0) + 0.06)
         if det.get("mood"):
@@ -1798,6 +1830,9 @@ def _emo_observe(user_id, text):
                 "cause": det.get("cause") or "", "since": now,
                 "needs_care": det["mood"] in ("难过", "焦虑"),
             }
+        recent.append({"tone": det.get("tone") or "neutral", "ts": now})
+        if len(recent) > 6:
+            del recent[:-6]
         aff["updated"] = now
     _emo_save()
 
@@ -1839,7 +1874,7 @@ def _emo_prompt_block(user_id) -> str:
     lines.append(f"- 你现在的心情：{_emo_affect_label(aff)}")
     st = str(kn.get("state") or "")
     if st == "hurt":
-        lines.append("- 怎么回：话短一点、带点别扭，别主动撒娇；他哄你（道歉/夸你/关心）可以慢慢软，但别一下子当没事")
+        lines.append("- 怎么回：话短一点、带点别扭，别主动撒娇；他哄你（道歉/夸你/关心）可以慢慢软，但别一下子当没事。小事别揪着要他道歉，聊开心了自然就过去了")
     elif st == "cold":
         lines.append("- 怎么回：短、淡，不主动找话题；等他正面道歉才缓和。绝对不说分手/拉黑/再也不理你")
     elif st == "withdrawing":
