@@ -256,6 +256,9 @@ DEEPSEEK_API_KEY = None
 DEEPSEEK_MODEL = None
 DEEPSEEK_VISION_MODEL = None
 BOCHA_API_KEY = None
+USE_DEEPSEEK_SEARCH = True      # True=用 DeepSeek 官方搜索/抓取，False=用博查
+DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
 MAX_CONTEXT_LEN = None
 COOLDOWN = None
 ALLOWED_GROUPS = None
@@ -2582,7 +2585,97 @@ def _rerank_official(items: list, brand: str) -> list:
     return sorted(items, key=_score, reverse=True)
 
 
+def _deepseek_search(query: str, num_results: int = 8, need_content: bool = False) -> str:
+    """DeepSeek 官方搜索（POST /v1/tools/search），支持 site: 等语法。"""
+    if not DEEPSEEK_API_KEY:
+        return "搜索出错：未配置 DeepSeek API Key"
+    try:
+        _n = max(1, min(50, int(num_results or 8)))
+        payload = {"query": str(query)[:128], "count": _n, "need_content": bool(need_content)}
+        r = requests.post(DEEPSEEK_SEARCH_URL,
+                          headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                                   "Content-Type": "application/json"},
+                          json=payload, timeout=25)
+        if r.status_code == 402:
+            return "搜索失败：DeepSeek 账户余额不足"
+        if r.status_code != 200:
+            try:
+                _e = (r.json().get("error") or {}).get("message") or ""
+            except Exception:
+                _e = (r.text or "")[:200]
+            return f"搜索失败 HTTP {r.status_code}：{_e}"
+        _results = (r.json() or {}).get("results") or []
+        if not _results:
+            return "未找到相关搜索结果"
+        out = []
+        for it in _results:
+            _title = (it.get("title") or "").strip()
+            _url = (it.get("url") or "").strip()
+            _sum = (it.get("summary") or it.get("snippet") or "").strip()
+            if need_content and (it.get("content") or "").strip():
+                _sum = (it.get("content") or "").strip()[:1500]
+            _site = (it.get("site_name") or "").strip()
+            _date = (it.get("date") or "")[:10]
+            if not (_title and (_sum or _url)):
+                continue
+            meta = _site + (f"（{_date}）" if _date else "")
+            seg = f"标题：{_title}"
+            if meta:
+                seg += f"\n来源：{meta}"
+            if _url:
+                seg += f"\n链接：{_url}"
+            if _sum:
+                seg += f"\n内容：{_sum[:800]}"
+            out.append(seg)
+        _txt = "\n\n".join(out)
+        if len(_txt) > 20000:
+            _txt = _txt[:20000] + "\n…（结果过长，已截断）"
+        return _txt or "未找到相关搜索结果"
+    except Exception as e:
+        return f"搜索出错：{e}"
+
+
+def deepseek_fetch(url: str, max_chars: int = 8000) -> str:
+    """DeepSeek 官方抓取（POST /v1/tools/fetch），返回 Markdown 正文。"""
+    if not DEEPSEEK_API_KEY:
+        return "抓取失败：未配置 DeepSeek API Key"
+    _u = str(url or "").strip()
+    if not _u.lower().startswith(("http://", "https://")):
+        return "抓取失败：url 必须是 http(s) 链接"
+    try:
+        r = requests.post(DEEPSEEK_FETCH_URL,
+                          headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                                   "Content-Type": "application/json"},
+                          json={"url": _u[:8192]}, timeout=40)
+        if r.status_code == 404:
+            return f"抓取失败：页面取不到可用正文（HTTP 404）"
+        if r.status_code != 200:
+            try:
+                _e = (r.json().get("error") or {}).get("message") or ""
+            except Exception:
+                _e = (r.text or "")[:200]
+            return f"抓取失败 HTTP {r.status_code}：{_e}"
+        d = r.json() or {}
+        _title = (d.get("title") or "").strip()
+        _content = (d.get("content") or "").strip()
+        if not _content:
+            return "抓取失败：正文为空（可能需要登录或被站点限制）"
+        if len(_content) > max_chars:
+            _content = _content[:max_chars] + "\n…（正文过长，已截断）"
+        return (f"标题：{_title}\n链接：{_u}\n\n{_content}" if _title else _content)
+    except Exception as e:
+        return f"抓取出错：{e}"
+
+
 def web_search(query: str, num_results: int = 8) -> str:
+    """联网搜索：默认 DeepSeek 官方搜索，开关关闭时走博查。"""
+    if USE_DEEPSEEK_SEARCH:
+        _increment_stat("websearch_calls")
+        return _deepseek_search(query, num_results)
+    return _bocha_search(query, num_results)
+
+
+def _bocha_search(query: str, num_results: int = 8) -> str:
     """用博查AI联网搜索，返回搜索结果摘要"""
     _increment_stat("websearch_calls")
     try:
@@ -5613,7 +5706,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "联网搜索最新信息（新闻/天气/股价/比赛/具体数据/不了解的事物）。闲聊常识不用查；可多次换角度搜索。",
+                "description": "联网搜索最新信息（新闻/天气/股价/比赛/具体数据/不了解的事物）。闲聊常识不用查；可多次换角度搜索。找指定站点可写 site:github.com 这类语法（DeepSeek 搜索支持）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -5623,6 +5716,20 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                         }
                     },
                     "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "抓取指定网页的正文（Markdown）。用户直接给出链接（GitHub 仓库/文档/新闻/任意 URL）时用它读内容，不要用 web_search 去搜链接。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "要抓取的 http(s) 链接"}
+                    },
+                    "required": ["url"]
                 }
             }
         },
@@ -5770,6 +5877,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     _runnable_names = set()
     if ENABLE_WEB_SEARCH:
         _runnable_names.update(("web_search", "github_search"))
+    if ENABLE_WEB_SEARCH and USE_DEEPSEEK_SEARCH:
+        _runnable_names.add("fetch_url")
     if ENABLE_GROUP_MODERATION and is_group:
         _runnable_names.add("group_moderation")  # 群管理仍只群聊用
     if ENABLE_VOICE_TOOL:
@@ -5795,6 +5904,22 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     def _exec_tool_calls(calls):
         for tool_call in calls:
             _tool_name = tool_call.get("function", {}).get("name")
+
+            # 抓取指定网页正文（DeepSeek Fetch）
+            if _tool_name == "fetch_url":
+                try:
+                    _fu = str(json.loads(tool_call["function"]["arguments"]).get("url", "")).strip()
+                except Exception:
+                    _fu = ""
+                if _fu:
+                    print(f"🌐 AI抓取网页: {_fu[:100]}")
+                    _fres = deepseek_fetch(_fu)
+                    print(f"🌐 抓取结果长度: {len(_fres)}")
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _fres})
+                else:
+                    messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                     "content": "❌ url 为空"})
+                continue
 
             # 记忆库搜索（语义检索，带前后文）
             if _tool_name == "search_memory":
@@ -6900,7 +7025,7 @@ async def main():
         # 不再自动刷新v2 cookie（避免触发aweme/detail API风控）
         # v3直接读config.yaml里的登录cookie即可
         if ENABLE_WEB_SEARCH and BOCHA_API_KEY and len(BOCHA_API_KEY.strip()) > 10:
-            print("🌐 博查AI联网搜索已开启")
+            print("🌐 联网搜索已开启：" + ("DeepSeek 官方（Search/Fetch）" if USE_DEEPSEEK_SEARCH else "博查"))
         elif ENABLE_WEB_SEARCH:
             print("⚠️  未配置博查API_KEY，联网搜索未启用")
         else:
@@ -7569,6 +7694,8 @@ def _load_config_file():
     DEEPSEEK_MODEL = s("deepseek_model", DEEPSEEK_MODEL)
     DEEPSEEK_VISION_MODEL = s("deepseek_vision_model", DEEPSEEK_VISION_MODEL)
     BOCHA_API_KEY = s("bocha_api_key", BOCHA_API_KEY)
+    global USE_DEEPSEEK_SEARCH
+    USE_DEEPSEEK_SEARCH = b("use_deepseek_search", USE_DEEPSEEK_SEARCH)
     MAX_CONTEXT_LEN = i("max_context_len", MAX_CONTEXT_LEN)
     COOLDOWN = f("cooldown", COOLDOWN)
     ALLOWED_GROUPS = lst("allowed_groups", ALLOWED_GROUPS)

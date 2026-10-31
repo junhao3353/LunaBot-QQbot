@@ -612,6 +612,7 @@ def _get_features_config():
     return {
         # 对话行为
         "enable_web_search": cfg.get("enable_web_search", True),
+        "use_deepseek_search": cfg.get("use_deepseek_search", True),
         "search_result_num": cfg.get("search_result_num", 8),
         "enable_thinking_chat": cfg.get("enable_thinking_chat", True),
         "enable_thinking_vision": cfg.get("enable_thinking_vision", True),
@@ -747,6 +748,7 @@ def _save_features_config(data):
         changed = False
         # 对话行为
         if "enable_web_search" in data: cfg["enable_web_search"] = _b("enable_web_search"); changed = True
+        if "use_deepseek_search" in data: cfg["use_deepseek_search"] = _b("use_deepseek_search"); changed = True
         if "search_result_num" in data: cfg["search_result_num"] = _clamp_int(data["search_result_num"], 1, 20, 8); changed = True
         if "enable_thinking_chat" in data: cfg["enable_thinking_chat"] = _b("enable_thinking_chat"); changed = True
         if "enable_thinking_vision" in data: cfg["enable_thinking_vision"] = _b("enable_thinking_vision"); changed = True

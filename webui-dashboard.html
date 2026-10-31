@@ -781,8 +781,12 @@
           <h5 class="mb-2">对话行为</h5>
           <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_websearch"><span class="pill-slider"></span></label>
-            <span class="feat-label">联网搜索（博查）</span>
+            <span class="feat-label">联网搜索</span>
             <div class="feat-param"><label>结果数</label><input type="number" class="form-control" id="feat_search_num" min="1" max="20"></div>
+          </div>
+          <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_ds_search"><span class="pill-slider"></span></label>
+            <span class="feat-label">搜索走 DeepSeek 官方（关=用博查）</span>
           </div>
           <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_think_chat"><span class="pill-slider"></span></label>
@@ -1383,6 +1387,7 @@
         const sw = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
         const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         sw('feat_websearch', c.enable_web_search);
+        sw('feat_ds_search', c.use_deepseek_search);
         sw('feat_think_chat', c.enable_thinking_chat);
         sw('feat_think_vision', c.enable_thinking_vision);
         sw('feat_show_think', c.show_thinking_content);
@@ -1444,6 +1449,7 @@
       const btn = document.querySelector('#page-features button[onclick="saveFeatures()"]');
       const data = {
         enable_web_search: document.getElementById('feat_websearch').checked,
+        use_deepseek_search: document.getElementById('feat_ds_search').checked,
         search_result_num: _pi('feat_search_num', 8),
         enable_thinking_chat: document.getElementById('feat_think_chat').checked,
         enable_thinking_vision: document.getElementById('feat_think_vision').checked,

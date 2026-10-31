@@ -30,6 +30,7 @@ allowed_users: [你的QQ号, 管理员QQ号]
 # ---------- 功能开关 ----------
 # 是否开启联网搜索
 enable_web_search: true
+use_deepseek_search: true   # 搜索/抓取走 DeepSeek 官方（false=用博查）
 # 是否在机器人上线/下线时往群里发通知
 enable_notify: false
 # 每次搜索返回的结果条数
