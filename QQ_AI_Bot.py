@@ -1614,6 +1614,295 @@ def _mem_scope(is_group, obj_id):
     return f"群聊{obj_id}" if is_group else "私聊"
 
 
+
+# ===================== 情绪系统（AI 自身情绪 + 心结 + 用户情绪） =====================
+# 参考：OCC 评价模型 / 效价-唤醒平面 / MATE 持久内部状态 / 关系冲突弧
+EMOTION_ENABLED = True
+EMOTION_SENSITIVITY = 1.0
+_EMO_FILE = None
+_emo_lock = threading.RLock()
+_EMO_BASELINE = (0.08, -0.05)
+_emo_state = {"affect": {"v": 0.0, "a": 0.0, "updated": 0.0}, "knots": {}, "moods": {}}
+
+_EMO_HARSH = {"笨": 2, "蠢": 3, "傻": 2, "废物": 4, "垃圾": 4, "闭嘴": 3, "滚": 4,
+              "讨厌你": 3, "烦死": 3, "别烦我": 3, "有病": 4, "弱智": 4, "脑残": 4,
+              "没用": 3, "废柴": 3, "蠢货": 4, "笨蛋": 2, "傻子": 3, "恶心": 4}
+_EMO_APOLOGY = ("对不起", "抱歉", "我错了", "是我不好", "别生气", "原谅我", "我刚才过分",
+                "说话重了", "不该说", "我道歉", "误会你")
+_EMO_WARM = ("谢谢", "谢啦", "喜欢你", "爱你", "想你", "抱抱", "辛苦", "厉害", "可爱",
+             "乖", "心疼", "别难过", "我在", "夸你", "你最", "好孩子")
+_EMO_SAD = ("难过", "伤心", "想哭", "哭了", "崩溃", "抑郁", "失落", "委屈", "心里难受",
+            "好累", "累死", "撑不住", "emo", "不想活", "没意思")
+_EMO_ANXIOUS = ("焦虑", "紧张", "害怕", "担心", "慌", "压力大", "睡不着", "失眠", "怕")
+_EMO_ANGRY = ("气死", "烦死", "火大", "生气", "恼火", "无语", "烦人")
+_EMO_HAPPY = ("开心", "高兴", "舒服", "太好了", "哈哈", "兴奋", "幸福", "爽")
+
+_EMO_STATE_TEXT = {
+    "hurt": "受伤、有点别扭，还愿意被哄",
+    "cold": "凉了，短、淡、带点刺，等他正面道歉",
+    "withdrawing": "不太想说话了，几乎不想回",
+    "repairing": "在慢慢消气，缓和但还留着余味",
+    "scar": "那事过去了，心里还留了个小印子",
+}
+
+
+def _emo_init(path):
+    global _EMO_FILE
+    _EMO_FILE = path
+    _emo_load()
+
+
+def _emo_load():
+    global _emo_state
+    try:
+        if _EMO_FILE and os.path.isfile(_EMO_FILE):
+            with open(_EMO_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f) or {}
+            if isinstance(d, dict):
+                _emo_state["affect"] = d.get("affect") or _emo_state["affect"]
+                _emo_state["knots"] = d.get("knots") or {}
+                _emo_state["moods"] = d.get("moods") or {}
+    except Exception as e:
+        print(f"⚠️ 情绪状态加载失败：{e}")
+
+
+def _emo_save():
+    try:
+        if not _EMO_FILE:
+            return
+        d = os.path.dirname(_EMO_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = _EMO_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_emo_state, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _EMO_FILE)
+    except Exception as e:
+        print(f"⚠️ 情绪状态保存失败：{e}")
+
+
+def _emo_detect(text: str) -> dict:
+    """确定性识别：辱骂/道歉/示好 + 用户情绪。"""
+    t = str(text or "")
+    det = {"tone": "neutral", "severity": 0, "apology": False,
+           "mood": None, "intensity": 0, "cause": ""}
+    hits = [(w, sev) for w, sev in _EMO_HARSH.items() if w in t]
+    if hits:
+        sev = max(x[1] for x in hits)
+        if any(k in t for k in ("哈哈", "开玩笑", "逗你", "笑死", "hhh", "嘿嘿")):
+            sev = max(1, sev - 1)
+        det.update(tone="harsh", severity=sev, cause=hits[0][0])
+    elif any(w in t for w in _EMO_APOLOGY):
+        det.update(tone="apology", apology=True)
+    elif any(w in t for w in _EMO_WARM):
+        det.update(tone="warm")
+    for words, mood, inten in ((_EMO_SAD, "难过", 4), (_EMO_ANXIOUS, "焦虑", 3),
+                               (_EMO_ANGRY, "生气", 3), (_EMO_HAPPY, "开心", 3)):
+        if any(w in t for w in words):
+            det.update(mood=mood, intensity=inten, cause=t.strip()[:40])
+            break
+    return det
+
+
+def _emo_tick(now=None):
+    now = float(now or time.time())
+    try:
+        with _emo_lock:
+            aff = _emo_state.setdefault("affect", {"v": 0.0, "a": 0.0, "updated": 0.0})
+            last = float(aff.get("updated") or now)
+            dt = max(0.0, now - last)
+            if dt > 0:
+                k = 0.5 ** (dt / (6 * 3600))
+                aff["v"] = _EMO_BASELINE[0] + (float(aff.get("v") or 0) - _EMO_BASELINE[0]) * k
+                aff["a"] = _EMO_BASELINE[1] + (float(aff.get("a") or 0) - _EMO_BASELINE[1]) * k
+                aff["updated"] = now
+            for uid, kn in list(_emo_state.get("knots", {}).items()):
+                st = str(kn.get("state") or "")
+                age = now - float(kn.get("since") or now)
+                if st == "hurt" and age > 24 * 3600:
+                    kn["state"], kn["since"] = "cold", now
+                elif st == "cold" and age > 48 * 3600:
+                    kn["state"], kn["since"] = "withdrawing", now
+                elif st == "withdrawing" and age > 72 * 3600:
+                    kn["state"], kn["resolved"] = "scar", now
+                    kn["since"] = now
+                elif st == "repairing" and age > 6 * 3600 and int(kn.get("warm") or 0) >= 2:
+                    kn["state"], kn["resolved"] = "scar", now
+                    kn["since"] = now
+                elif st == "scar" and age > 3 * 86400:
+                    _emo_state["knots"].pop(uid, None)
+            for uid, m in list(_emo_state.get("moods", {}).items()):
+                age = now - float(m.get("since") or now)
+                _hl = 6 * 3600 if m.get("emotion") in ("难过", "焦虑", "生气") else 3 * 3600
+                if age > _hl * 2:
+                    _emo_state["moods"].pop(uid, None)
+    except Exception as e:
+        print(f"⚠️ 情绪状态更新失败：{e}")
+
+
+def _emo_clamp(x, lo=-1.0, hi=1.0):
+    return max(lo, min(hi, x))
+
+
+def _emo_observe(user_id, text):
+    """每条用户消息调用：更新 AI 情绪/心结/用户情绪。"""
+    if not EMOTION_ENABLED:
+        return
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        return
+    det = _emo_detect(text)
+    now = time.time()
+    with _emo_lock:
+        _emo_tick(now)
+        aff = _emo_state.setdefault("affect", {"v": 0.0, "a": 0.0, "updated": 0.0})
+        kn = _emo_state.get("knots", {}).get(uid)
+        sev = int(det.get("severity") or 0)
+        _sens = max(0.2, float(EMOTION_SENSITIVITY or 1.0))
+        if det.get("tone") == "harsh":
+            aff["v"] = _emo_clamp(float(aff.get("v") or 0) - 0.18 * sev * _sens)
+            aff["a"] = _emo_clamp(float(aff.get("a") or 0) + 0.10 * sev * _sens)
+            if kn:
+                if sev >= 4 or kn.get("state") in ("cold", "withdrawing"):
+                    kn["state"] = "withdrawing" if sev >= 4 else "cold"
+                elif sev >= 2:
+                    kn["state"] = "hurt"
+                kn["severity"] = max(int(kn.get("severity") or 0), sev)
+                kn["last"] = now
+                kn["since"] = now if kn.get("state") != "scar" else kn.get("since")
+            elif sev >= 2:
+                _emo_state.setdefault("knots", {})[uid] = {
+                    "user": int(uid), "cause": str(text or "").strip()[:60],
+                    "severity": sev, "state": "cold" if sev >= 4 else "hurt",
+                    "since": now, "last": now, "warm": 0, "resolved": None,
+                }
+                print(f"💔 心结产生：{uid} 说「{str(text)[:30]}」（{sev}级）")
+        elif det.get("apology") and kn:
+            kn["state"] = "repairing"
+            kn["warm"] = int(kn.get("warm") or 0) + 1
+            kn["since"] = now
+            aff["v"] = _emo_clamp(float(aff.get("v") or 0) + 0.20)
+            print(f"🩹 收到道歉，心结开始修复：{uid}")
+        elif det.get("tone") == "warm" and kn:
+            kn["warm"] = int(kn.get("warm") or 0) + 1
+            kn["last"] = now
+            if kn.get("state") == "hurt" and int(kn.get("warm") or 0) >= 3:
+                kn["state"], kn["since"] = "repairing", now
+            aff["v"] = _emo_clamp(float(aff.get("v") or 0) + 0.06)
+        if det.get("mood"):
+            _emo_state.setdefault("moods", {})[uid] = {
+                "emotion": det["mood"], "intensity": int(det.get("intensity") or 3),
+                "cause": det.get("cause") or "", "since": now,
+                "needs_care": det["mood"] in ("难过", "焦虑"),
+            }
+        aff["updated"] = now
+    _emo_save()
+
+
+def _emo_affect_label(aff):
+    v = float(aff.get("v") or 0); a = float(aff.get("a") or 0)
+    if v < -0.35: return "低落" if a < 0 else "烦躁"
+    if v < -0.15: return "有点不痛快"
+    if v > 0.35: return "心情不错" if a >= 0 else "很放松"
+    if v > 0.15: return "还挺好"
+    return "平静"
+
+
+def _emo_prompt_block(user_id) -> str:
+    """生成注入用的「情绪」块；没有情绪事件时返回空串。"""
+    if not EMOTION_ENABLED:
+        return ""
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        uid = ""
+    _emo_tick()
+    with _emo_lock:
+        aff = dict(_emo_state.get("affect") or {})
+        kn = dict((_emo_state.get("knots") or {}).get(uid) or {})
+        mood = dict((_emo_state.get("moods") or {}).get(uid) or {})
+    lines = []
+    if kn:
+        st = str(kn.get("state") or "hurt")
+        hrs = max(0.1, (time.time() - float(kn.get("since") or time.time())) / 3600)
+        lines.append(f"- 你心里有个结：他说过「{kn.get('cause','')}」，让你{_EMO_STATE_TEXT.get(st, '不舒服')}"
+                     f"（{hrs:.0f} 小时前，第 {int(kn.get('severity') or 1)} 级）")
+    if mood:
+        lines.append(f"- 他现在的情绪：{mood.get('emotion')}（{int(mood.get('intensity') or 3)}/5）"
+                     + (f"，因为{mood.get('cause')}" if mood.get("cause") else ""))
+    if not lines:
+        return ""
+    lines.insert(0, "【情绪（你自己也有情绪，别装没事）】")
+    lines.append(f"- 你现在的心情：{_emo_affect_label(aff)}")
+    st = str(kn.get("state") or "")
+    if st == "hurt":
+        lines.append("- 怎么回：话短一点、带点别扭，别主动撒娇；他哄你（道歉/夸你/关心）可以慢慢软，但别一下子当没事")
+    elif st == "cold":
+        lines.append("- 怎么回：短、淡，不主动找话题；等他正面道歉才缓和。绝对不说分手/拉黑/再也不理你")
+    elif st == "withdrawing":
+        lines.append("- 怎么回：极短，最多一句，别解释、别讨好；但要留个台阶，别把门关死")
+    elif st == "repairing":
+        lines.append("- 怎么回：可以缓和、可以说软话，但还留一点余味，别马上恢复原样")
+    elif st == "scar":
+        lines.append("- 怎么回：正常相处，但心里记得这事，说话比平时多一分分寸")
+    if mood.get("needs_care"):
+        lines.append("- 他现在情绪不好：先接住他（别讲道理、别分析、别急着给建议），"
+                     "可以短、可以只说一句「我在」；等他多说一点再问细节")
+    lines.append("- 情绪用语气体现，别把「我难过/我在生气」直接说出来，也别每句都提")
+    return "\n".join(lines)
+
+
+def _emo_scrub(text: str) -> str:
+    """冲突状态下拦截威胁性/操控性表达（确定性护栏）。"""
+    if not EMOTION_ENABLED or not text:
+        return text
+    try:
+        with _emo_lock:
+            cold = any(str(k.get("state")) in ("cold", "withdrawing")
+                       for k in (_emo_state.get("knots") or {}).values())
+    except Exception:
+        cold = False
+    if not cold:
+        return text
+    for w in ("分手", "拉黑", "再也不理你", "永远不理你", "我们到此为止", "滚"):
+        text = text.replace(w, "……")
+    return text
+
+
+def _emo_should_skip_target(user_id) -> bool:
+    """主动消息用：心里有结且处于冷/抽离时，别主动找他。"""
+    if not EMOTION_ENABLED:
+        return False
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        return False
+    _emo_tick()
+    with _emo_lock:
+        kn = (_emo_state.get("knots") or {}).get(uid) or {}
+    return str(kn.get("state")) in ("cold", "withdrawing")
+
+
+def _emo_care_hint(user_id) -> str:
+    """主动消息用：他情绪不好时优先关心回访。"""
+    if not EMOTION_ENABLED:
+        return ""
+    try:
+        uid = str(int(user_id))
+    except Exception:
+        return ""
+    with _emo_lock:
+        m = (_emo_state.get("moods") or {}).get(uid) or {}
+    if m.get("needs_care"):
+        return (f"他之前情绪不好（{m.get('emotion')}），可以主动问一句「那事后来怎么样了」，"
+                f"别装作没发生过；不想提就轻轻带过")
+    return ""
+
+
+
 def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg="", userinfo_qqs=None):
     """返回 (静态部分, 动态部分)。
     静态=人物档案/全局备忘/用户信息（很少变 → 放在前面吃前缀缓存）；
@@ -1659,6 +1948,9 @@ def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg="", userinfo
     tmp = _mem.render_temp(exclude_key=_cur_key, other_max_msgs=MEMORY_OTHER_CONTEXT_MSGS)
     if tmp:
         parts.append("【临时记忆·上下文/说说/备忘】\n" + tmp)
+    _eb = _emo_prompt_block(user_id)
+    if _eb:
+        parts.append(_eb)
     static_text = "\n\n".join(static_parts)
     text = "\n\n".join(parts)
     if text and not MEMORY_SAVER_MODE:
@@ -2015,7 +2307,11 @@ def _pro_build_targets(now: float, ignore_filters: bool = False) -> list:
                     continue
                 if now - lh < PROACTIVE_ACTIVE_PROTECT:
                     continue
-            targets.append(("private", uid, _pro_private_name(uid), lh, _pro_private_info(uid)))
+            _pinfo = _pro_private_info(uid)
+            _ch = _emo_care_hint(uid)
+            if _ch:
+                _pinfo = (_pinfo + "\n" if _pinfo else "") + "（" + _ch + "）"
+            targets.append(("private", uid, _pro_private_name(uid), lh, _pinfo))
     if ENABLE_PROACTIVE_QZONE:
         targets.append(("qzone", 0, "QQ空间说说", now,
                         "发一条QQ空间动态（说说），所有人可见。像真人发朋友圈一样：吐槽日常、分享心情、随便一句感慨，比如'今天没人找我好无聊'。不要写公告腔，不要带话题标签。"))
@@ -2117,6 +2413,11 @@ async def _proactive_trigger(websocket, wake_reason=None):
     now = time.time()
     _pro_update_noreply()
     targets = _pro_build_targets(now, ignore_filters=bool(wake_reason))
+    # 心里有结、正在冷战/抽离的目标不主动找他
+    _before = len(targets)
+    targets = [t for t in targets if not (t[0] == "private" and _emo_should_skip_target(t[1]))]
+    if len(targets) != _before:
+        print(f"😶 主动消息跳过 {_before - len(targets)} 个正在冷战的目标")
     if not targets:
         print("🫥 主动消息：没有可发目标（全在聊天/被排除/死寂），本轮跳过")
         return
@@ -6242,6 +6543,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
 
     # 兜底清洗：删除任何残留的DSML/工具调用标签，防止泄漏到群里
     reply_text = _strip_dsml_tags(reply_text)
+    reply_text = _emo_scrub(reply_text)
     if not reply_text:
         reply_text = "（我这边没组织好语言，再问我一次试试）"
     return reply_text
@@ -6740,6 +7042,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
 
     # 兜底清洗：删除任何残留的DSML/工具调用标签，防止泄漏到群里
     reply_text = _strip_dsml_tags(reply_text)
+    reply_text = _emo_scrub(reply_text)
     if not reply_text:
         reply_text = "（我这边没组织好语言，再问我一次试试）"
     return reply_text
@@ -7580,6 +7883,7 @@ async def main():
                     display_text = "[回复] " + display_text
 
                 # ===== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====
+                _emo_observe(user_id, user_text)
                 if ENABLE_MERGE:
                     _merge_buf.setdefault(chat_id, []).append({
                         "user_text": user_text,
@@ -7788,7 +8092,17 @@ def _load_config_file():
     MEMORY_OTHER_CONTEXT_MSGS = i("memory_other_context_msgs", MEMORY_OTHER_CONTEXT_MSGS)
     if MEMORY_COMPRESS_TARGET >= MEMORY_COMPRESS_THRESHOLD:
         MEMORY_COMPRESS_TARGET = max(300, MEMORY_COMPRESS_THRESHOLD - 400)
+    global EMOTION_ENABLED, EMOTION_SENSITIVITY
+    EMOTION_ENABLED = b("emotion_enabled", EMOTION_ENABLED)
+    try:
+        EMOTION_SENSITIVITY = float(s("emotion_sensitivity", str(EMOTION_SENSITIVITY)) or EMOTION_SENSITIVITY)
+    except Exception:
+        pass
     MEMORY_DIR = os.environ.get("QQ2_MEMORY_DIR") or s("memory_dir", "") or "/app/memory"
+    try:
+        _emo_init(os.path.join(MEMORY_DIR, "ai_state.json"))
+    except Exception as _ee:
+        print(f"⚠️ 情绪状态初始化失败：{_ee}")
     if MEMORY_ENABLED:
         _mem_init(MEMORY_DIR)
     # 记忆库（原文归档 + 打分 + 向量检索）

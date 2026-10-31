@@ -414,3 +414,11 @@ embedding_dim: 1024
   - 新增 POST /v1/tools/fetch 与 fetch_url 工具：用户直接发链接（GitHub/文档/新闻）时抓正文，不再靠搜
   - 开关 use_deepseek_search（默认开），关掉回退博查；WebUI 功能设置里可切
   - 计费：DeepSeek Search/Fetch 每 1000 次成功请求 ¥5，失败不计费
+
+- 情绪系统（2026-10-31）：
+  - AI 自身情绪：效价-唤醒平面 + 心结状态机（hurt/cold/withdrawing/repairing/scar），确定性词表识别，不额外调用模型
+  - 心结修复：道歉 → repairing，需时间+暖话；72h 硬上限转 scar，不无限冷战
+  - 用户情绪感知：难过/焦虑/生气/开心 → 注入"先接住情绪"指令；主动消息做 care 回访
+  - 主动消息：冷战目标跳过不发；情绪不好的人优先关心
+  - 护栏：冷战态拦截"分手/拉黑/再也不理你"等表达
+  - 持久化 memory/ai_state.json；WebUI 开关 + 敏感度

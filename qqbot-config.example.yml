@@ -310,3 +310,7 @@ sleep_min_hours: 8
 sleep_max_hours: 10
 sleep_window_start: 20
 sleep_window_end: 5
+
+# 情绪系统（AI 自身情绪 + 心结 + 用户情绪感知）
+emotion_enabled: true
+emotion_sensitivity: 1.0

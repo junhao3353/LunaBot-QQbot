@@ -789,6 +789,11 @@
             <span class="feat-label">搜索走 DeepSeek 官方（关=用博查）</span>
           </div>
           <div class="feat-row">
+            <label class="pill"><input type="checkbox" id="feat_emotion"><span class="pill-slider"></span></label>
+            <span class="feat-label">情绪系统（AI 也会受伤/心结/感知你情绪）</span>
+            <div class="feat-param"><label>敏感度</label><input type="number" class="form-control" id="feat_emotion_sens" step="0.1" min="0.2" max="3"></div>
+          </div>
+          <div class="feat-row">
             <label class="pill"><input type="checkbox" id="feat_think_chat"><span class="pill-slider"></span></label>
             <span class="feat-label">聊天思考模式</span>
           </div>
@@ -1388,6 +1393,8 @@
         const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         sw('feat_websearch', c.enable_web_search);
         sw('feat_ds_search', c.use_deepseek_search);
+        sw('feat_emotion', c.emotion_enabled);
+        setv('feat_emotion_sens', c.emotion_sensitivity ?? 1.0);
         sw('feat_think_chat', c.enable_thinking_chat);
         sw('feat_think_vision', c.enable_thinking_vision);
         sw('feat_show_think', c.show_thinking_content);
@@ -1450,6 +1457,8 @@
       const data = {
         enable_web_search: document.getElementById('feat_websearch').checked,
         use_deepseek_search: document.getElementById('feat_ds_search').checked,
+        emotion_enabled: document.getElementById('feat_emotion').checked,
+        emotion_sensitivity: parseFloat(document.getElementById('feat_emotion_sens').value) || 1.0,
         search_result_num: _pi('feat_search_num', 8),
         enable_thinking_chat: document.getElementById('feat_think_chat').checked,
         enable_thinking_vision: document.getElementById('feat_think_vision').checked,
