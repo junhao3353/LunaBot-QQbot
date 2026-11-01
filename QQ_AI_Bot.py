@@ -2080,6 +2080,46 @@ def _emo_prompt_block(user_id) -> str:
     return "\n".join(lines)
 
 
+def _emo_voice_style() -> str:
+    """根据当前情绪给 TTS 一个默认语气指令（AI 没写 style 时兜底）。"""
+    try:
+        d = _emo_dominant()
+    except Exception:
+        d = None
+    if d:
+        return {
+            "得意": "语气上扬、带点小骄傲、轻快",
+            "心动": "轻软、撒娇、尾音软一点",
+            "开心": "轻快、带笑、语速稍快",
+            "委屈": "压低、慢一点、带点不情愿",
+            "心疼": "放轻、温柔、慢速",
+            "无聊": "懒散、拖一点",
+            "想你": "轻软、黏一点",
+            "释然": "放松、自然",
+        }.get(d.get("label") or "", "")
+    return ""
+
+
+def _augment_voice_style(text: str, style: str) -> str:
+    """唱歌/念诗时补一点节奏提示，避免念经感。"""
+    _s = str(style or "").strip()
+    _t = str(text or "")
+    if any(k in _t for k in ("唱", "歌", "哼")) and "唱" not in _s:
+        _s = (_s + "，" if _s else "") + "像唱歌一样有旋律，轻声哼唱，留一点气口"
+    _poem = any(k in _t for k in ("诗", "词", "文言", "吟"))
+    if not _poem:
+        # 五言/七言节奏（多个分句都是 5 或 7 字）也当诗
+        try:
+            _cl = [x.strip() for x in re.split(r"[，。！？,.;；\s]+", _t) if x.strip()]
+            if len(_cl) >= 2 and all(len(x) in (5, 7) for x in _cl):
+                _poem = True
+        except Exception:
+            _poem = False
+    if _poem and ("顿挫" not in _s and "念" not in _s):
+        _s = (_s + "，" if _s else "") + "按古诗的节奏和顿挫念，句尾留白"
+    return _s
+
+
 def _emo_scrub(text: str) -> str:
     """冲突状态下拦截威胁性/操控性表达（确定性护栏）。"""
     if not EMOTION_ENABLED or not text:
@@ -6304,14 +6344,16 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             "type": "function",
             "function": {
                 "name": "send_voice",
-                "description": "把文字转成语音条发到当前对话。想用语音、群友想听声音时用;文字≤50字,别整段语音。",
+                "description": ("把文字转成语音条发到当前对话。想用语音、群友想听声音时用;文字≤50字,别整段语音。"
+                                "必须同时给 style：这句要怎么演（情绪+语气+语速/停顿）。唱歌、念诗、读课文要写节奏和情绪，"
+                                "否则会像念经。也可以在 text 里加 (sighs)(laughs)(breath) 这类语气标签。"),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "要转成语音的文字"},
-                        "style": {"type": "string", "description": "可选：这句话的语气，比如「轻软撒娇」「委屈一点」「压低声音」；不填用默认语气"}
+                        "style": {"type": "string", "description": "必填：这句怎么演。例：委屈、轻声、慢一点 / 兴奋、语速快、带笑 / 低沉、念古诗的顿挫 / 轻哼、有点跑调"}
                     },
-                    "required": ["text"]
+                    "required": ["text", "style"]
                 }
             }
         })
@@ -6559,7 +6601,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 try:
                     _vd = json.loads(tool_call["function"]["arguments"])
                     _vtext = str(_vd.get("text", "")).strip()
-                    _vstyle = str(_vd.get("style", "") or "").strip()
+                    _vstyle = _augment_voice_style(_vtext, str(_vd.get("style", "") or "").strip() or _emo_voice_style())
                 except Exception:
                     _vtext = ""
                 if _vtext:
@@ -6910,13 +6952,15 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
             "type": "function",
             "function": {
                 "name": "send_voice",
-                "description": "文字转语音工具:把文字转成语音条发到当前对话。当群友要求你说话/发语音/读出来,或你觉得用语音回复更合适时调用。调用后工具会合成并发送语音,返回成功/失败,你仍然可以同时文字回复。",
+                "description": ("文字转语音工具:把文字转成语音条发到当前对话。当群友要求你说话/发语音/读出来,或你觉得用语音回复更合适时调用。"
+                                "必须给 style（这句怎么演：情绪+语气+语速），唱歌念诗要写节奏。"),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "要转语音的文字内容"}
+                        "text": {"type": "string", "description": "要转语音的文字内容"},
+                        "style": {"type": "string", "description": "必填：这句怎么演，如「轻软撒娇、慢一点」「兴奋、语速快」"}
                     },
-                    "required": ["text"]
+                    "required": ["text", "style"]
                 }
             }
         })
@@ -7107,7 +7151,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                 try:
                     _vd2 = json.loads(tool_call["function"]["arguments"])
                     _vtext = str(_vd2.get("text", "")).strip()
-                    _vstyle = str(_vd2.get("style", "") or "").strip()
+                    _vstyle = _augment_voice_style(_vtext, str(_vd2.get("style", "") or "").strip() or _emo_voice_style())
                 except Exception:
                     _vtext = ""
                 if _vtext:
