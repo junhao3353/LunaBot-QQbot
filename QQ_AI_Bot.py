@@ -4396,6 +4396,10 @@ def _sleep_request(reason, goodnight="", target=0):
     global _sleep_pending
     if goodnight and target:
         _sync_send_text(target, False, goodnight)
+        try:
+            _pro_append_history("private", int(target), [goodnight])
+        except Exception:
+            pass
         _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
                           "target": int(target), "reason": reason,
                           "sent_at": time.time()}
@@ -4403,6 +4407,18 @@ def _sleep_request(reason, goodnight="", target=0):
         return f"✅ 晚安已发，等 {SLEEP_REPLY_WAIT} 分钟；有回复就继续聊，没回再睡"
     _sync_sleep(False, target, reason, "")
     return "✅ 已进入睡眠"
+
+
+def _sleep_wait_hint() -> str:
+    """发晚安等待回复期间：告诉模型“你只是说了晚安，还没真睡”。"""
+    if not _sleep_pending:
+        return ""
+    try:
+        _mins = max(1, int((float(_sleep_pending.get("deadline") or 0) - time.time()) / 60))
+    except Exception:
+        _mins = 1
+    return (f"\n\n【睡眠状态】你刚才跟他说了晚安，现在在等他回复（大约还有 {_mins} 分钟），"
+            "你还没真的睡。如果他回了，就正常聊；别自己先说「我去睡了」或「我已经睡了」。")
 
 
 def _sleep_pending_tick(now):
@@ -4438,6 +4454,10 @@ async def _sleep_request_async(reason, goodnight="", target=0):
                 print(f"⚠️ 晚安发送失败（第{_i+1}次）：{e}")
                 await asyncio.sleep(2)
         if _ok:
+            try:
+                _pro_append_history("private", int(target), [goodnight])
+            except Exception as _he:
+                print(f"⚠️ 晚安写入上下文失败：{_he}")
             _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
                               "target": int(target), "reason": reason,
                               "sent_at": time.time()}
@@ -6497,7 +6517,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                    + _tts_sound_tag_hint())
     # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
     _mem_static, _mem_dynamic = _mem_prompt_parts(user_id, is_group, obj_id, cq_msg, raw_msg)
-    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic
+    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic + _sleep_wait_hint()
     messages = [{"role": "system", "content": _sys_stable}]
     if _mem_static:
         # 静态记忆（档案/全局/用户信息）单独一条，很少变 → 吃前缀缓存
@@ -7118,7 +7138,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
                    + _tts_sound_tag_hint())
     # 专属提示词每轮可能变（群里只有白名单在场才注入），和记忆块一起放动态部分，保护稳定前缀缓存
     _mem_static, _mem_dynamic = _mem_prompt_parts(user_id, is_group, obj_id, cq_msg, raw_msg)
-    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic
+    _sys_dynamic = (_special_prompt_block(user_id) if special else "") + _mem_dynamic + _sleep_wait_hint()
     messages = [{"role": "system", "content": _sys_stable}]
     if _mem_static:
         # 静态记忆（档案/全局/用户信息）单独一条，很少变 → 吃前缀缓存
