@@ -327,3 +327,4 @@ proactive_tick_seconds: 60
 sleep_ask_enabled: true
 sleep_ask_interval_minutes: 60
 sleep_ask_protect_minutes: 10
+sleep_reply_wait_minutes: 15   # 发晚安后等多久回复，没回再下线

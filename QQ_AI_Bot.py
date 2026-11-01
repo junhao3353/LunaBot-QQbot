@@ -2862,7 +2862,7 @@ async def _proactive_trigger(websocket, wake_reason=None, trigger_reason=None):
         except Exception:
             _stid = 0
         if _stt in ("private", "group") and _stid:
-            _sres = _sync_sleep(_stt == "group", _stid, _sreason, _sgn)
+            _sres = _sleep_request(_sreason, _sgn, 0 if _stt == "group" else _stid)
         else:
             _sres = _sync_sleep(False, 0, _sreason, "")
         print(f"😴 主动消息决定睡觉：{_sres}")
@@ -3156,6 +3156,17 @@ async def _sleep_ask_loop(websocket):
             if not _sleep_now_ok(now):
                 _sleep_next_ask = now + 1800      # 不在窗口内，半小时后再看
                 continue
+            # 已发晚安，等待回复
+            _st = _sleep_pending_tick(now)
+            if _st:
+                if _st["action"] == "replied":
+                    print("🌙 有人回了晚安，取消睡眠，继续聊")
+                    _sleep_next_ask = now + SLEEP_ASK_INTERVAL * 60
+                elif _st["action"] == "timeout":
+                    print("🌙 等了没回复，安静下线")
+                    _sync_sleep(False, _st.get("target") or 0, _st.get("reason") or "困了", "")
+                    return
+                continue
             if now < _sleep_next_ask:
                 continue
             # 保护：最近有正常对话 → 推迟，别聊着聊着去睡
@@ -3183,7 +3194,7 @@ async def _sleep_ask_loop(websocket):
                 _target = 0
             print(f"😴 决定去睡：{_reason}")
             if _target and _gn:
-                _sync_sleep(False, _target, _reason, _gn)
+                _sleep_request(_reason, _gn, _target)
             else:
                 _sync_sleep(False, 0, _reason, "")
             return
@@ -3725,9 +3736,11 @@ SLEEP_WINDOW_END = 5                   # 05:00 后不再允许
 SLEEP_ASK_ENABLED = True               # 睡眠窗口内单独定时询问要不要睡
 SLEEP_ASK_INTERVAL = 60                # 拒绝后隔多少分钟再问
 SLEEP_ASK_PROTECT = 10                 # 最近多少分钟有正常对话就推迟问
+SLEEP_REPLY_WAIT = 15                  # 发晚安后等多少分钟回复，没回再下线
 _sleep_wake_info = None                # 启动时检测到的起床信息
 _sleep_offline_until = 0.0             # 这段时间内的旧消息只缓存不回复
 _sleep_next_ask = 0.0                  # 下一次问"要不要睡"的时间
+_sleep_pending = None                  # 已发晚安、等待回复的睡眠请求
 _startup_ts = 0.0
 
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
@@ -4386,6 +4399,39 @@ def _sync_sleep(is_group, chat_id, reason, goodnight="") -> str:
         return f"✅ 已进入睡眠，预计 {_wk} 自动醒来"
     except Exception as e:
         return f"❌ 睡觉请求异常：{e}"
+
+
+def _sleep_request(reason, goodnight="", target=0):
+    """发晚安后等一会儿：有回复就取消睡眠，没回再真正下线。"""
+    global _sleep_pending
+    if goodnight and target:
+        _sync_send_text(target, False, goodnight)
+        _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
+                          "target": int(target), "reason": reason,
+                          "sent_at": time.time()}
+        print(f"😴 晚安已发，等 {SLEEP_REPLY_WAIT} 分钟看有没有回复")
+        return f"✅ 晚安已发，等 {SLEEP_REPLY_WAIT} 分钟；有回复就继续聊，没回再睡"
+    _sync_sleep(False, target, reason, "")
+    return "✅ 已进入睡眠"
+
+
+def _sleep_pending_tick(now):
+    """检查"已发晚安等回复"的状态：replied / timeout / wait。"""
+    global _sleep_pending
+    p = _sleep_pending
+    if not p:
+        return None
+    try:
+        _rep = _pro_human_ts(f"p{p['target']}")
+    except Exception:
+        _rep = 0
+    if _rep > float(p.get("sent_at") or 0):
+        _sleep_pending = None
+        return {"action": "replied", "target": p.get("target"), "reason": p.get("reason")}
+    if now >= float(p.get("deadline") or 0):
+        _sleep_pending = None
+        return {"action": "timeout", "target": p.get("target"), "reason": p.get("reason")}
+    return {"action": "wait"}
 
 
 def _offline_add(data) -> None:
@@ -6841,7 +6887,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 _reason = str(_sd.get("reason") or "")[:100]
                 _gn = str(_sd.get("goodnight") or "").strip()
                 print(f"😴 AI请求睡觉：{_reason}｜晚安语：{_gn}")
-                _sres = _sync_sleep(is_group, obj_id, _reason, _gn)
+                _sres = _sleep_request(_reason, _gn, 0 if is_group else obj_id)
                 print(f"😴 睡觉结果：{_sres}")
                 messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _sres})
                 continue
@@ -8681,6 +8727,8 @@ def _load_config_file():
     SLEEP_ASK_ENABLED = b("sleep_ask_enabled", SLEEP_ASK_ENABLED)
     SLEEP_ASK_INTERVAL = i("sleep_ask_interval_minutes", SLEEP_ASK_INTERVAL)
     SLEEP_ASK_PROTECT = i("sleep_ask_protect_minutes", SLEEP_ASK_PROTECT)
+    global SLEEP_REPLY_WAIT
+    SLEEP_REPLY_WAIT = i("sleep_reply_wait_minutes", SLEEP_REPLY_WAIT)
     _tts_engine = s("tts_engine", "")
     if _tts_engine:
         TTS_ENGINE = _tts_engine
