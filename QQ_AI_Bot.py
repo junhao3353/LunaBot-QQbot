@@ -1622,11 +1622,47 @@ EMOTION_SENSITIVITY = 1.0
 _EMO_FILE = None
 _emo_lock = threading.RLock()
 _EMO_BASELINE = (0.08, -0.05)
-_emo_state = {"affect": {"v": 0.0, "a": 0.0, "updated": 0.0}, "knots": {}, "moods": {}}
+_emo_state = {"affect": {"v": 0.0, "a": 0.0, "updated": 0.0}, "knots": {}, "moods": {},
+              "emotions": []}
 
 _EMO_HARSH = {"笨": 2, "蠢": 3, "傻": 2, "废物": 4, "垃圾": 4, "闭嘴": 3, "滚": 4,
               "讨厌你": 3, "烦死": 3, "别烦我": 3, "有病": 4, "弱智": 4, "脑残": 4,
               "没用": 3, "废柴": 3, "蠢货": 4, "笨蛋": 2, "傻子": 3, "恶心": 4}
+# AI 自己的情绪触发（词 → 情绪标签/效价增量/唤醒增量）
+_EMO_AI_TRIGGERS = (
+    ("praise", ("厉害", "棒", "聪明", "可爱", "好看", "牛", "强啊", "优秀", "真行", "乖", "好孩子"),
+     "得意", 0.16, 0.10),
+    ("affection", ("喜欢你", "爱你", "想你", "抱抱", "亲亲", "么么", "宝贝", "想我", "最好了"),
+     "心动", 0.24, 0.14),
+    ("joy", ("哈哈", "笑死", "hhh", "好耶", "开心", "太好了", "爽", "兴奋"),
+     "开心", 0.12, 0.18),
+    ("sympathy", ("难过", "崩溃", "哭了", "委屈", "撑不住", "好累", "emo"),
+     "心疼", -0.08, 0.10),
+    ("gratitude", ("谢谢", "谢啦", "辛苦了", "麻烦你"),
+     "开心", 0.08, 0.06),
+)
+
+_AI_EMO_GUIDE = {
+    "开心": "心情好：话可以多一点、爱接梗，允许主动发表情包/语音",
+    "得意": "有点小得意：可以小小地求夸、显摆一下，但别过头",
+    "心动": "有点心动/黏人：可以撒娇、说软话，但别每句都黏",
+    "委屈": "有点委屈：话短一点、带点别扭，别硬装没事",
+    "心疼": "有点心疼他：语气软下来，先关心，别讲道理",
+    "无聊": "有点无聊：可以主动找话说、抛话题，别干等着",
+    "想你": "有点想他：可以主动冒个泡、撒个娇",
+    "释然": "松了口气：语气软回来，可以自然一点",
+}
+
+_USER_EMO_GUIDE = {
+    "开心": "他在开心：跟着乐、起哄，可以闹一点",
+    "难过": "他难过：先接住情绪，别讲道理、别分析、别急着给建议；可以说「我在」",
+    "焦虑": "他焦虑：先安抚，别否定他的担心；等他稳一点再给具体办法",
+    "生气": "他在气头上：先站他这边、顺着说，别唱反调和讲道理",
+    "疲惫": "他很累：句子短一点、别追问，关心他休息",
+    "无聊": "他无聊：陪他聊、主动抛话题，别只回「哦」",
+    "兴奋": "他很兴奋：跟着一起兴奋，别泼冷水",
+}
+
 _EMO_SARCASTIC = ("大聪明", "真是个人才", "你可真", "就你懂", "呵呵", "行吧你", "厉害了",
                   "牛啊", "您可真", "真不愧是", "不愧是您", "真有你的", "您厉害")
 _EMO_APOLOGY = ("对不起", "抱歉", "我错了", "是我不好", "别生气", "原谅我", "我刚才过分",
@@ -1635,10 +1671,13 @@ _EMO_WARM = ("谢谢", "谢啦", "喜欢你", "爱你", "想你", "抱抱", "辛
              "乖", "心疼", "别难过", "我在", "夸你", "你最", "好孩子", "真好", "好棒",
              "太好了", "听话", "乖乖")
 _EMO_SAD = ("难过", "伤心", "想哭", "哭了", "崩溃", "抑郁", "失落", "委屈", "心里难受",
-            "好累", "累死", "撑不住", "emo", "不想活", "没意思")
+            "撑不住", "emo", "不想活", "没意思")
 _EMO_ANXIOUS = ("焦虑", "紧张", "害怕", "担心", "慌", "压力大", "睡不着", "失眠", "怕")
 _EMO_ANGRY = ("气死", "烦死", "火大", "生气", "恼火", "无语", "烦人")
 _EMO_HAPPY = ("开心", "高兴", "舒服", "太好了", "哈哈", "兴奋", "幸福", "爽")
+_EMO_TIRED = ("好累", "累死", "困", "疲惫", "没力气", "熬夜", "加班")
+_EMO_BORED = ("无聊", "没意思", "好闲", "没事干", "闲着")
+_EMO_EXCITED = ("激动", "兴奋", "太爽了", "牛逼", "卧槽", "绝了")
 
 _EMO_STATE_TEXT = {
     "hurt": "受伤、有点别扭，还愿意被哄",
@@ -1705,11 +1744,54 @@ def _emo_detect(text: str) -> dict:
     elif any(w in t for w in _EMO_WARM):
         det.update(tone="warm")
     for words, mood, inten in ((_EMO_SAD, "难过", 4), (_EMO_ANXIOUS, "焦虑", 3),
-                               (_EMO_ANGRY, "生气", 3), (_EMO_HAPPY, "开心", 3)):
+                               (_EMO_ANGRY, "生气", 3), (_EMO_TIRED, "疲惫", 3),
+                               (_EMO_BORED, "无聊", 2), (_EMO_EXCITED, "兴奋", 4),
+                               (_EMO_HAPPY, "开心", 3)):
         if any(w in t for w in words):
             det.update(mood=mood, intensity=inten, cause=t.strip()[:40])
             break
     return det
+
+
+def _emo_add(label, intensity, cause="", now=None):
+    """给 AI 自己加一条情绪（会合并同类、衰减淘汰）。"""
+    now = float(now or time.time())
+    try:
+        with _emo_lock:
+            lst = _emo_state.setdefault("emotions", [])
+            for e in lst:
+                if e.get("label") == label and now - float(e.get("since") or 0) < 6 * 3600:
+                    e["intensity"] = min(1.0, float(e.get("intensity") or 0) + intensity)
+                    e["since"] = now
+                    e["cause"] = cause or e.get("cause") or ""
+                    break
+            else:
+                lst.append({"label": label, "intensity": min(1.0, intensity),
+                            "cause": cause, "since": now})
+            if len(lst) > 6:
+                del lst[:-6]
+    except Exception:
+        pass
+
+
+def _emo_dominant(now=None):
+    """当前最强情绪（强度×新鲜度）。"""
+    now = float(now or time.time())
+    try:
+        with _emo_lock:
+            best, best_score = None, 0.0
+            for e in (_emo_state.get("emotions") or []):
+                age = max(0.0, now - float(e.get("since") or now))
+                score = float(e.get("intensity") or 0) * (0.5 ** (age / (3 * 3600)))
+                if score > best_score:
+                    best, best_score = e, score
+            if best and best_score >= 0.15:
+                best = dict(best)
+                best["score"] = best_score
+                return best
+    except Exception:
+        pass
+    return None
 
 
 def _emo_tick(now=None):
@@ -1752,6 +1834,10 @@ def _emo_tick(now=None):
                         continue
                 elif st == "scar" and age > 3 * 86400:
                     _emo_state["knots"].pop(uid, None)
+            _el = _emo_state.get("emotions") or []
+            _emo_state["emotions"] = [e for e in _el
+                                      if now - float(e.get("since") or now) < 6 * 3600
+                                      and float(e.get("intensity") or 0) >= 0.08]
             for uid, m in list(_emo_state.get("moods", {}).items()):
                 age = now - float(m.get("since") or now)
                 _hl = 6 * 3600 if m.get("emotion") in ("难过", "焦虑", "生气") else 3 * 3600
@@ -1897,6 +1983,25 @@ def _emo_observe(user_id, text, verdict=None):
             if int(kn.get("warm") or 0) >= (2 if _sev <= 3 else 3):
                 kn["state"], kn["since"] = "repairing", now
             aff["v"] = _emo_clamp(float(aff.get("v") or 0) + 0.06)
+        # AI 自己的情绪触发
+        _hit = None
+        for _name, _words, _label, _dv, _da in _EMO_AI_TRIGGERS:
+            if any(w in _t for w in _words):
+                _hit = (_name, _label, _dv, _da)
+                break
+        if _hit:
+            _emo_add(_hit[1], 0.5, _t[:40], now)
+            aff["v"] = _emo_clamp(float(aff.get("v") or 0) + _hit[2])
+            aff["a"] = _emo_clamp(float(aff.get("a") or 0) + _hit[3])
+        if det.get("tone") == "harsh" and kn:
+            _emo_add("委屈", 0.5, _t[:40], now)
+        if det.get("apology") and kn:
+            _emo_add("释然", 0.6, "他道歉了", now)
+        if det.get("tone") == "apology" and not kn:
+            _emo_add("开心", 0.2, "他道歉了", now)
+        if det.get("tone") == "warm" and not kn:
+            _emo_add("心动" if any(w in _t for w in ("喜欢你", "想你", "爱你", "抱抱")) else "开心",
+                     0.35, _t[:40], now)
         if det.get("mood"):
             _emo_state.setdefault("moods", {})[uid] = {
                 "emotion": det["mood"], "intensity": int(det.get("intensity") or 3),
@@ -1945,10 +2050,17 @@ def _emo_prompt_block(user_id) -> str:
     if mood:
         lines.append(f"- 他现在的情绪：{mood.get('emotion')}（{int(mood.get('intensity') or 3)}/5）"
                      + (f"，因为{mood.get('cause')}" if mood.get("cause") else ""))
-    if not lines:
+    _dom = _emo_dominant()
+    if not lines and not _dom:
         return ""
     lines.insert(0, "【情绪（你自己也有情绪，别装没事）】")
-    lines.append(f"- 你现在的心情：{_emo_affect_label(aff)}")
+    if _dom:
+        lines.append(f"- 你现在的心情：{_dom['label']}（{_dom.get('cause','')[:20]}）")
+        _gd = _AI_EMO_GUIDE.get(_dom["label"])
+        if _gd:
+            lines.append(f"  （{_gd}）")
+    else:
+        lines.append(f"- 你现在的心情：{_emo_affect_label(aff)}")
     st = str(kn.get("state") or "")
     if st == "hurt":
         lines.append("- 怎么回：话短一点、带点别扭，别主动撒娇；他哄你（道歉/夸你/关心）可以慢慢软，但别一下子当没事。小事别揪着要他道歉，聊开心了自然就过去了")
@@ -1960,9 +2072,10 @@ def _emo_prompt_block(user_id) -> str:
         lines.append("- 怎么回：可以缓和、可以说软话，但还留一点余味，别马上恢复原样")
     elif st == "scar":
         lines.append("- 怎么回：正常相处，但心里记得这事，说话比平时多一分分寸")
-    if mood.get("needs_care"):
-        lines.append("- 他现在情绪不好：先接住他（别讲道理、别分析、别急着给建议），"
-                     "可以短、可以只说一句「我在」；等他多说一点再问细节")
+    if mood:
+        _mg = _USER_EMO_GUIDE.get(mood.get("emotion") or "")
+        if _mg:
+            lines.append(f"- 怎么对他：{_mg}")
     lines.append("- 情绪用语气体现，别把「我难过/我在生气」直接说出来，也别每句都提")
     return "\n".join(lines)
 
