@@ -2569,8 +2569,6 @@ def _pro_build_targets(now: float, ignore_filters: bool = False) -> list:
         if not ignore_filters:
             if now - lh > PROACTIVE_DEAD_SECONDS:
                 continue  # 死寂群，发了没人看
-            if now - lh < PROACTIVE_ACTIVE_PROTECT:
-                continue  # 正在聊，不插话
         targets.append(("group", gid, f"群{gid}", lh, _pro_group_info(gid)))
     if ENABLE_PROACTIVE_PRIVATE:
         for uid in (ALLOWED_USERS or []):
@@ -2580,8 +2578,6 @@ def _pro_build_targets(now: float, ignore_filters: bool = False) -> list:
             lh = _pro_human_ts(key)
             if not ignore_filters:
                 if now - lh > PROACTIVE_DEAD_SECONDS:
-                    continue
-                if now - lh < PROACTIVE_ACTIVE_PROTECT:
                     continue
             _pinfo = _pro_private_info(uid)
             _ch = _emo_care_hint(uid)
@@ -2906,12 +2902,6 @@ async def _proactive_trigger(websocket, wake_reason=None, trigger_reason=None):
     valid = {(t[0], t[1]) for t in targets}
     if (target_type, target_id) not in valid:
         print(f"⚠️ 主动消息：AI选了非法/被排除/正在聊的目标 {target_type} {target_id}，放弃")
-        return
-
-    # 发送前最后复查：决策花了时间，目标可能突然开始聊天
-    key = f"g{target_id}" if target_type == "group" else f"p{target_id}"
-    if time.time() - _pro_human_ts(key) < PROACTIVE_ACTIVE_PROTECT:
-        print(f"🚫 主动消息：目标{key}决策期间突然活跃，中止发送")
         return
 
     try:
