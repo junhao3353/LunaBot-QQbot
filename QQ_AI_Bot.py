@@ -3182,10 +3182,6 @@ async def _sleep_ask_loop(websocket):
             except Exception:
                 _target = 0
             print(f"😴 决定去睡：{_reason}")
-            # 关系不好/正在闹别扭时别发晚安，免得突兀
-            if _target and _gn and _emo_should_skip_target(_target):
-                print("😴 正在闹别扭，不发晚安，安静睡")
-                _gn = ""
             if _target and _gn:
                 _sync_sleep(False, _target, _reason, _gn)
             else:
