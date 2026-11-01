@@ -2858,7 +2858,7 @@ async def _proactive_trigger(websocket, wake_reason=None, trigger_reason=None):
         except Exception:
             _stid = 0
         if _stt in ("private", "group") and _stid:
-            _sres = _sleep_request(_sreason, _sgn, 0 if _stt == "group" else _stid)
+            _sres = await _sleep_request_async(_sreason, _sgn, 0 if _stt == "group" else _stid)
         else:
             _sres = _sync_sleep(False, 0, _sreason, "")
         print(f"😴 主动消息决定睡觉：{_sres}")
@@ -3184,9 +3184,9 @@ async def _sleep_ask_loop(websocket):
                 _target = 0
             print(f"😴 决定去睡：{_reason}")
             if _target and _gn:
-                _sleep_request(_reason, _gn, _target)
+                await _sleep_request_async(_reason, _gn, _target)
             else:
-                _sync_sleep(False, 0, _reason, "")
+                await asyncio.to_thread(_sync_sleep, False, 0, _reason, "")
             return
         except asyncio.CancelledError:
             raise
@@ -4422,6 +4422,30 @@ def _sleep_pending_tick(now):
         _sleep_pending = None
         return {"action": "timeout", "target": p.get("target"), "reason": p.get("reason")}
     return {"action": "wait"}
+
+
+async def _sleep_request_async(reason, goodnight="", target=0):
+    """事件循环里调用：await 发晚安，再决定等待还是下线（避免跨线程死锁）。"""
+    global _sleep_pending
+    if goodnight and target:
+        _ok = False
+        for _i in range(2):
+            try:
+                await send_private_msg(_WS_REF, target, goodnight, no_delay=True)
+                _ok = True
+                break
+            except Exception as e:
+                print(f"⚠️ 晚安发送失败（第{_i+1}次）：{e}")
+                await asyncio.sleep(2)
+        if _ok:
+            _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
+                              "target": int(target), "reason": reason,
+                              "sent_at": time.time()}
+            print(f"😴 晚安已发，等 {SLEEP_REPLY_WAIT} 分钟看有没有回复")
+            return f"✅ 晚安已发，等 {SLEEP_REPLY_WAIT} 分钟；有回复就继续聊，没回再睡"
+        print("⚠️ 晚安发送失败，直接进入睡眠")
+    await asyncio.to_thread(_sync_sleep, False, target, reason, "")
+    return "✅ 已进入睡眠"
 
 
 def _offline_add(data) -> None:
