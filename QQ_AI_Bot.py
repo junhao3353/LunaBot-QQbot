@@ -3128,8 +3128,11 @@ def _sleep_ask_decide(now):
     _sys = (f"现在是 {_time_s}。你是活人，会困。判断你要不要现在去睡。"
             "困了/夜深了/聊累了/没人说话 → sleep；还想再待会儿 → stay。"
             + _ctx +
+            "睡前可以留一句话（可选，不是必须）：如果你们关系正常、气氛合适，就留一句自然的晚安；"
+            "如果正在闹别扭、他刚才没理你、或者关系一般，就别发，安静睡——"
+            "这会儿突然发消息会很突兀。"
             "只输出 JSON：{\"action\":\"sleep\"或\"stay\",\"reason\":\"一句话\","
-            "\"message\":\"睡前想说的话（可为空）\"}")
+            "\"message\":\"睡前想说的话（可空）\"}")
     try:
         raw = _pro_llm([{"role": "system", "content": _sys},
                         {"role": "user", "content": "现在要睡吗？"}], max_tokens=200)
@@ -3179,7 +3182,11 @@ async def _sleep_ask_loop(websocket):
             except Exception:
                 _target = 0
             print(f"😴 决定去睡：{_reason}")
-            if _target:
+            # 关系不好/正在闹别扭时别发晚安，免得突兀
+            if _target and _gn and _emo_should_skip_target(_target):
+                print("😴 正在闹别扭，不发晚安，安静睡")
+                _gn = ""
+            if _target and _gn:
                 _sync_sleep(False, _target, _reason, _gn)
             else:
                 _sync_sleep(False, 0, _reason, "")
@@ -5995,7 +6002,7 @@ def _sleep_tool_def():
                 "type": "object",
                 "properties": {
                     "reason": {"type": "string", "description": "为什么要睡（一句话，会写日志）"},
-                    "goodnight": {"type": "string", "description": "睡前发到当前对话的一句话，比如「晚安，我先睡啦」"}
+                    "goodnight": {"type": "string", "description": "可选：睡前想留的一句话。关系好/气氛合适才发；正在闹别扭或对方没理你，就别发，安静睡"}
                 },
                 "required": ["reason"]
             }
