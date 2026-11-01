@@ -1627,6 +1627,8 @@ _emo_state = {"affect": {"v": 0.0, "a": 0.0, "updated": 0.0}, "knots": {}, "mood
 _EMO_HARSH = {"笨": 2, "蠢": 3, "傻": 2, "废物": 4, "垃圾": 4, "闭嘴": 3, "滚": 4,
               "讨厌你": 3, "烦死": 3, "别烦我": 3, "有病": 4, "弱智": 4, "脑残": 4,
               "没用": 3, "废柴": 3, "蠢货": 4, "笨蛋": 2, "傻子": 3, "恶心": 4}
+_EMO_SARCASTIC = ("大聪明", "真是个人才", "你可真", "就你懂", "呵呵", "行吧你", "厉害了",
+                  "牛啊", "您可真", "真不愧是", "不愧是您", "真有你的", "您厉害")
 _EMO_APOLOGY = ("对不起", "抱歉", "我错了", "是我不好", "别生气", "原谅我", "我刚才过分",
                 "说话重了", "不该说", "我道歉", "误会你")
 _EMO_WARM = ("谢谢", "谢啦", "喜欢你", "爱你", "想你", "抱抱", "辛苦", "厉害", "可爱",
@@ -1695,6 +1697,9 @@ def _emo_detect(text: str) -> dict:
         if any(k in t for k in ("哈哈", "开玩笑", "逗你", "笑死", "hhh", "嘿嘿")):
             sev = max(1, sev - 1)
         det.update(tone="harsh", severity=sev, cause=hits[0][0])
+    elif any(w in t for w in _EMO_SARCASTIC):
+        # 明面上不带脏字，但可能是阴阳/反讽 —— 交给模型判断，先按 2 级候选
+        det.update(tone="harsh", severity=2, cause="反讽")
     elif any(w in t for w in _EMO_APOLOGY):
         det.update(tone="apology", apology=True)
     elif any(w in t for w in _EMO_WARM):
@@ -1760,7 +1765,70 @@ def _emo_clamp(x, lo=-1.0, hi=1.0):
     return max(lo, min(hi, x))
 
 
-def _emo_observe(user_id, text):
+_EMO_VERDICT_CACHE = {}
+
+
+def _emo_classify_tone(text: str, context: str = ""):
+    """让模型判断：这句针对 AI 的话是玩笑打闹，还是真的在骂/贬低。
+    只有命中刺人词时才调用（一天没几次），max_tokens 很小。返回 'JOKE'/'SERIOUS'/None。"""
+    _t = str(text or "").strip()[:200]
+    if not _t:
+        return None
+    _ck = (_t, str(context or "")[:200])
+    if _ck in _EMO_VERDICT_CACHE:
+        return _EMO_VERDICT_CACHE[_ck]
+    if not DEEPSEEK_API_KEY:
+        return None
+    _ctx_block = ("最近对话：" + chr(10) + str(context)[:200] + chr(10) + "现在这句：" if context else "")
+    try:
+        _sys = ("你是对话语气判断器。判断用户这句话（针对 AI）是「玩笑打闹/反讽调侃」还是「真的在骂人/贬低」。"
+                "依据：有没有笑意或反差、是不是亲密互损、是不是纯粹的贬低。"
+                "纯贬低、没有任何玩笑信号 → SERIOUS；明显反讽/玩梗/带笑 → JOKE；拿不准时 JOKE。"
+                "只输出一个词：JOKE 或 SERIOUS。")
+        r = requests.post("https://api.deepseek.com/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                                   "Content-Type": "application/json"},
+                          json={"model": DEEPSEEK_MODEL or "deepseek-flash",
+                                "messages": [{"role": "system", "content": _sys},
+                                             {"role": "user", "content": (_ctx_block + _t)}],
+                                "thinking": {"type": "disabled"},
+                                "temperature": 0, "max_tokens": 4},
+                          timeout=12)
+        if r.status_code != 200:
+            return None
+        _c = (((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip().upper()
+        _v = "SERIOUS" if "SERIOUS" in _c else ("JOKE" if "JOKE" in _c else None)
+        if _v:
+            _EMO_VERDICT_CACHE[_ck] = _v
+            if len(_EMO_VERDICT_CACHE) > 200:
+                _EMO_VERDICT_CACHE.clear()
+        return _v
+    except Exception:
+        return None
+
+
+async def _emo_observe_async(user_id, text):
+    """异步版：疑似刺人时交给模型判断是玩笑还是真骂，不阻塞主循环。"""
+    try:
+        _det = _emo_detect(text)
+        _verdict = None
+        if _det.get("tone") == "harsh" and int(_det.get("severity") or 0) <= 4:
+            try:
+                _uid = str(int(user_id))
+                _ctx = chr(10).join((_emo_state.get("recent_text") or {}).get(_uid, [])[-3:])
+            except Exception:
+                _ctx = ""
+            _verdict = await asyncio.to_thread(_emo_classify_tone, text, _ctx)
+        _emo_observe(user_id, text, verdict=_verdict)
+    except Exception as e:
+        print(f"⚠️ 情绪观察失败：{e}")
+        try:
+            _emo_observe(user_id, text)
+        except Exception:
+            pass
+
+
+def _emo_observe(user_id, text, verdict=None):
     """每条用户消息调用：更新 AI 情绪/心结/用户情绪。
     规则：玩笑/打闹不结心结；小刺只掉心情不结仇；大伤才进入状态机。"""
     if not EMOTION_ENABLED:
@@ -1778,8 +1846,13 @@ def _emo_observe(user_id, text):
         recent = _emo_state.setdefault("recent", {}).setdefault(uid, [])
         # 玩笑判断：本条有笑/“开玩笑”，或近 5 分钟刚有过暖互动
         _t = str(text or "")
-        _banter = any(k in _t for k in ("哈哈", "hhh", "嘿嘿", "笑死", "开玩笑", "逗你", "玩梗", "别当真", "开个玩笑"))
-        if not _banter and int(det.get("severity") or 0) <= 3:
+        if str(verdict or "").upper() == "JOKE":
+            _banter = True
+        elif str(verdict or "").upper() == "SERIOUS":
+            _banter = False
+        else:
+            _banter = any(k in _t for k in ("哈哈", "hhh", "嘿嘿", "笑死", "开玩笑", "逗你", "玩梗", "别当真", "开个玩笑"))
+        if str(verdict or "").upper() != "SERIOUS" and not _banter and int(det.get("severity") or 0) <= 3:
             if any(r.get("tone") in ("warm", "banter") and now - float(r.get("ts") or 0) < 300
                    for r in recent[-3:]):
                 _banter = True
@@ -1833,6 +1906,10 @@ def _emo_observe(user_id, text):
         recent.append({"tone": det.get("tone") or "neutral", "ts": now})
         if len(recent) > 6:
             del recent[:-6]
+        _rt = _emo_state.setdefault("recent_text", {}).setdefault(uid, [])
+        _rt.append(_t[:120])
+        if len(_rt) > 4:
+            del _rt[:-4]
         aff["updated"] = now
     _emo_save()
 
@@ -7918,7 +7995,7 @@ async def main():
                     display_text = "[回复] " + display_text
 
                 # ===== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====
-                _emo_observe(user_id, user_text)
+                await _emo_observe_async(user_id, user_text)
                 if ENABLE_MERGE:
                     _merge_buf.setdefault(chat_id, []).append({
                         "user_text": user_text,
