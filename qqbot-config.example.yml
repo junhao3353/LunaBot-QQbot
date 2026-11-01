@@ -314,3 +314,11 @@ sleep_window_end: 5
 # 情绪系统（AI 自身情绪 + 心结 + 用户情绪感知）
 emotion_enabled: true
 emotion_sensitivity: 1.0
+
+# 主动消息冲动引擎
+proactive_daily_cap: 6
+proactive_refractory_min: 60
+proactive_refractory_max: 180
+proactive_quiet_start: 1
+proactive_quiet_end: 7
+proactive_tick_seconds: 60

@@ -301,7 +301,14 @@ PROACTIVE_COOLDOWN_BASE = 5400     # 触发后冷却基础时间，默认1.5小�
 PROACTIVE_COOLDOWN_RANDOM = 5400   # 冷却额外随机上限（实际冷却=基础+0~该值），默认再加0~1.5小时
 PROACTIVE_GROUP_GIVEUP = 2         # 群连续几次主动发没人回就移出候选
 PROACTIVE_PRIVATE_GIVEUP = 1       # 私聊连续几次没回就移出候选（私聊更严格，避免查岗感）
-PROACTIVE_DEAD_SECONDS = 43200     # 死寂门槛：目标最后真人消息早于该秒数（默认12小时）则不列入候选
+PROACTIVE_DEAD_SECONDS = 43200
+# 冲动引擎（替代固定定时器）
+PROACTIVE_DAILY_CAP = 6          # 每天最多主动几次
+PROACTIVE_REFRACTORY_MIN = 60    # 两次之间至少隔多少分钟（随机）
+PROACTIVE_REFRACTORY_MAX = 180
+PROACTIVE_QUIET_START = 1        # 安静时段（1:00~7:00 不主动）
+PROACTIVE_QUIET_END = 7
+PROACTIVE_TICK_SECONDS = 60      # 每 60 秒评估一次要不要开口     # 死寂门槛：目标最后真人消息早于该秒数（默认12小时）则不列入候选
 PROACTIVE_ACTIVE_PROTECT = 300     # 活跃保护期：目标最后真人消息在该秒数内（默认5分钟）视为"正在聊"，不发
 # 运行时状态（不持久化，重启后重新计时）
 _pro_start_ts = time.time()
@@ -309,6 +316,10 @@ _pro_active_state = "idle"         # idle=静默等待 / waiting=随机延迟中
 _pro_last_api_ts = 0.0             # 最后一次正常API对话时间（全局重置点）
 _pro_next_fire = 0.0               # 下一次触发/状态切换的时间戳
 _pro_round = 0                     # 连续主动轮次（决定提示词，正常对话后归零）
+_pro_day = ""                      # 当前日期（用于每日额度重置）
+_pro_sends_today = 0               # 今天主动次数
+_pro_next_earliest = 0.0           # 冷却到什么时候
+_pro_self_said = []                # AI 自己主动说过的话 [{"ts","text","target"}]
 _pro_excluded_groups = set()       # 被排除的群（连续没回达到阈值）
 _pro_excluded_private = set()      # 被排除的私聊QQ
 _pro_last_human = {}               # 目标key(g群号/pQQ) -> 最后真人消息时间戳
@@ -2672,7 +2683,7 @@ def _pro_append_history(target_type: str, target_id: int, message: str):
             print(f"⚠️ 主动消息入队记忆库失败：{e}")
 
 
-async def _proactive_trigger(websocket, wake_reason=None):
+async def _proactive_trigger(websocket, wake_reason=None, trigger_reason=None):
     """一次主动消息触发：统计没回→建目标池→AI先自己想话题(找不到才search补搜)→发送前复查→发送入历史。"""
     global _pro_used_topics
     now = time.time()
@@ -2740,6 +2751,9 @@ async def _proactive_trigger(websocket, wake_reason=None):
              + ("，也可以发一条空间说说" if _qzone_ok else "") + "。目的是像真人一样偶尔冒个泡，不是完成任务。",
              "⚠️ 本次是主动发言，没有工具可调用：不要输出表情包/说说/搜记忆/群管理这些工具调用，只按下面 JSON 格式回答。",
              _wake_line,
+             (f"这次想开口的原因：{trigger_reason}。别把原因直说，用行动/话题体现。" if trigger_reason else ""),
+             ("你之前主动说过的话（可能没被接）：\n" + "\n".join(f"- {x['text'][:40]}" for x in _pro_self_said[-3:])
+              if _pro_self_said else ""),
              "",
              "怎么开口（按顺序挑）：",
              "1. 大约一半的情况，别找话题，直接来一句没信息量但有人味的话："
@@ -2920,6 +2934,12 @@ async def _proactive_trigger(websocket, wake_reason=None):
         return
 
     _pro_last_send[key] = time.time()
+    try:
+        for _m in messages_to_send:
+            _pro_self_said.append({"ts": time.time(), "text": _m[:80], "target": key})
+        del _pro_self_said[:-10]
+    except Exception:
+        pass
     _pro_used_topics.append(messages_to_send[0][:50])
     if len(_pro_used_topics) > 20:
         _pro_used_topics.pop(0)
@@ -3014,48 +3034,128 @@ async def _wake_loop(websocket):
             print(f"⚠️ 定时调度异常: {e}")
 
 
+def _pro_quiet_now(now=None):
+    s0, e0 = PROACTIVE_QUIET_START, PROACTIVE_QUIET_END
+    if s0 == e0:
+        return False
+    h = time.localtime(now or time.time()).tm_hour
+    return (s0 <= h < e0) if s0 < e0 else (h >= s0 or h < e0)
+
+
+def _pro_urge(now):
+    """返回 (冲动分数 0~1.5, 原因)。分数越高，每分钟开口概率越大。"""
+    score, reasons = 0.0, []
+    _lasts = []
+    for g in (ALLOWED_GROUPS or []):
+        _lasts.append(_pro_human_ts(f"g{g}"))
+    if ENABLE_PROACTIVE_PRIVATE:
+        for u in (ALLOWED_USERS or []):
+            _lasts.append(_pro_human_ts(f"p{u}"))
+    _last = max(_lasts or [0])
+    idle = now - _last if _last else 999999
+    if idle > 2 * 3600:
+        score += 0.15
+        reasons.append("安静挺久了")
+    if idle > 6 * 3600:
+        score += 0.1
+    # AI 自己的情绪
+    try:
+        _d = _emo_dominant()
+        _lab = (_d or {}).get("label")
+        if _lab == "想你":
+            score += 0.35; reasons.append("有点想他")
+        elif _lab == "无聊":
+            score += 0.30; reasons.append("有点无聊")
+        elif _lab in ("心动", "开心"):
+            score += 0.12; reasons.append("心情不错")
+    except Exception:
+        pass
+    # 对方情绪需要回访
+    try:
+        for _u in (ALLOWED_USERS or []):
+            _m = (_emo_state.get("moods") or {}).get(str(_u)) or {}
+            if _m.get("needs_care"):
+                _age = now - float(_m.get("since") or now)
+                if 3600 <= _age <= 24 * 3600:
+                    score += 0.35
+                    reasons.append("他之前情绪不好，想问问")
+                    break
+    except Exception:
+        pass
+    # 被晾过几次
+    try:
+        _ign = sum(int(v or 0) for v in (_pro_noreply or {}).values())
+        if _ign >= 2:
+            score += 0.10
+            reasons.append(f"被晾了{_ign}次")
+    except Exception:
+        pass
+    # 时间语境
+    _h = time.localtime(now).tm_hour
+    if 7 <= _h <= 10:
+        score += 0.20; reasons.append("早上了")
+    elif 21 <= _h <= 23:
+        score += 0.15; reasons.append("晚上了")
+    return score, "，".join(reasons)
+
+
+def _pro_roll_day(now):
+    global _pro_day, _pro_sends_today
+    _d = time.strftime("%Y-%m-%d", time.localtime(now))
+    if _d != _pro_day:
+        _pro_day = _d
+        _pro_sends_today = 0
+
+
 async def _proactive_loop(websocket):
-    """主动消息常驻协程：全局状态机 idle→waiting→触发→cooldown 循环。"""
-    global _pro_active_state, _pro_last_api_ts, _pro_next_fire, _pro_round
+    """主动消息：冲动引擎。每 60 秒评估一次「现在有多想开口」，按概率触发。
+    触发源：安静太久 / 想你 / 无聊 / 对方情绪不好 / 被晾 / 早晚时段。"""
+    global _pro_last_api_ts, _pro_round, _pro_next_earliest, _pro_sends_today
     _pro_last_api_ts = time.time()
-    await asyncio.sleep(20)  # 等WS和成员缓存稳定
-    print(f"🟢 主动消息已开启：静默{PROACTIVE_IDLE_SECONDS//60}分钟+随机0~{PROACTIVE_RANDOM_MAX//60}分钟触发，"
-          f"冷却{PROACTIVE_COOLDOWN_BASE//60}~{(PROACTIVE_COOLDOWN_BASE+PROACTIVE_COOLDOWN_RANDOM)//60}分钟，"
-          f"私聊{'开' if ENABLE_PROACTIVE_PRIVATE else '关'}")
+    await asyncio.sleep(20)
+    print(f"🟢 主动消息冲动引擎：每天最多{PROACTIVE_DAILY_CAP}次，间隔"
+          f"{PROACTIVE_REFRACTORY_MIN}~{PROACTIVE_REFRACTORY_MAX}分钟，"
+          f"{PROACTIVE_QUIET_START}:00~{PROACTIVE_QUIET_END}:00 安静，私聊{'开' if ENABLE_PROACTIVE_PRIVATE else '关'}")
     while True:
         try:
-            await asyncio.sleep(10)
+            await asyncio.sleep(PROACTIVE_TICK_SECONDS)
             if not ENABLE_PROACTIVE_MSG:
                 continue
             now = time.time()
-            if _pro_active_state == "idle":
-                if now - _pro_last_api_ts >= PROACTIVE_IDLE_SECONDS:
-                    _pro_active_state = "waiting"
-                    delay = random.uniform(0, PROACTIVE_RANDOM_MAX)
-                    _pro_next_fire = now + delay
-                    print(f"⏳ 已静默{PROACTIVE_IDLE_SECONDS//60}分钟，进入消息模式，{int(delay//60)}分{int(delay%60)}秒后触发")
-            elif _pro_active_state == "waiting":
-                if now >= _pro_next_fire:
-                    _pro_round += 1
-                    try:
-                        await _proactive_trigger(websocket)
-                    except Exception as e:
-                        print(f"⚠️ 主动消息触发异常：{e}")
-                    _pro_active_state = "cooldown"
-                    cd = PROACTIVE_COOLDOWN_BASE + random.uniform(0, PROACTIVE_COOLDOWN_RANDOM)
-                    _pro_next_fire = now + cd
-                    print(f"😴 主动消息冷却 {int(cd//60)}分钟")
-            elif _pro_active_state == "cooldown":
-                if now >= _pro_next_fire:
-                    _pro_active_state = "waiting"
-                    delay = random.uniform(0, PROACTIVE_RANDOM_MAX)
-                    _pro_next_fire = now + delay
-                    print(f"⏳ 冷却结束，进入消息模式，{int(delay//60)}分{int(delay%60)}秒后触发")
+            _pro_roll_day(now)
+            if _pro_sends_today >= PROACTIVE_DAILY_CAP:
+                continue
+            if now < _pro_next_earliest:
+                continue
+            if _pro_quiet_now(now):
+                continue
+            # 刚聊过（10 分钟内有人说话）→ 不插嘴
+            _lasts = [_pro_human_ts(f"g{g}") for g in (ALLOWED_GROUPS or [])]
+            if ENABLE_PROACTIVE_PRIVATE:
+                _lasts += [_pro_human_ts(f"p{u}") for u in (ALLOWED_USERS or [])]
+            if _lasts and now - max(_lasts) < 600:
+                continue
+            score, why = _pro_urge(now)
+            if score <= 0:
+                continue
+            _p = min(0.5, score * 0.02)     # 每分钟开口概率：分数越高越可能
+            if random.random() >= _p:
+                continue
+            _pro_round += 1
+            _pro_sends_today += 1
+            print(f"💭 主动冲动触发（{why or '没来由'}，概率{_p:.2f}，今日第{_pro_sends_today}次）")
+            try:
+                await _proactive_trigger(websocket, trigger_reason=why)
+            except Exception as e:
+                print(f"⚠️ 主动消息触发异常：{e}")
+            _cd = random.uniform(PROACTIVE_REFRACTORY_MIN, max(PROACTIVE_REFRACTORY_MIN, PROACTIVE_REFRACTORY_MAX)) * 60
+            _pro_next_earliest = now + _cd
+            print(f"😴 下次最早 {int(_cd//60)} 分钟后")
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"⚠️ 主动消息循环异常：{e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
 
 
 # ==================================================================
@@ -8327,6 +8427,14 @@ def _load_config_file():
     PROACTIVE_GROUP_GIVEUP = i("proactive_group_giveup", PROACTIVE_GROUP_GIVEUP)
     PROACTIVE_PRIVATE_GIVEUP = i("proactive_private_giveup", PROACTIVE_PRIVATE_GIVEUP)
     PROACTIVE_DEAD_SECONDS = i("proactive_dead_seconds", PROACTIVE_DEAD_SECONDS)
+    global PROACTIVE_DAILY_CAP, PROACTIVE_REFRACTORY_MIN, PROACTIVE_REFRACTORY_MAX
+    global PROACTIVE_QUIET_START, PROACTIVE_QUIET_END, PROACTIVE_TICK_SECONDS
+    PROACTIVE_DAILY_CAP = i("proactive_daily_cap", PROACTIVE_DAILY_CAP)
+    PROACTIVE_REFRACTORY_MIN = i("proactive_refractory_min", PROACTIVE_REFRACTORY_MIN)
+    PROACTIVE_REFRACTORY_MAX = i("proactive_refractory_max", PROACTIVE_REFRACTORY_MAX)
+    PROACTIVE_QUIET_START = i("proactive_quiet_start", PROACTIVE_QUIET_START)
+    PROACTIVE_QUIET_END = i("proactive_quiet_end", PROACTIVE_QUIET_END)
+    PROACTIVE_TICK_SECONDS = i("proactive_tick_seconds", PROACTIVE_TICK_SECONDS)
     PROACTIVE_ACTIVE_PROTECT = i("proactive_active_protect", PROACTIVE_ACTIVE_PROTECT)
     for _pv in (PROACTIVE_IDLE_SECONDS, PROACTIVE_RANDOM_MAX, PROACTIVE_COOLDOWN_BASE, PROACTIVE_COOLDOWN_RANDOM, PROACTIVE_DEAD_SECONDS, PROACTIVE_ACTIVE_PROTECT):
         if _pv < 0: _pv = 0
