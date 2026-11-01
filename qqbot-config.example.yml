@@ -322,3 +322,8 @@ proactive_refractory_max: 180
 proactive_quiet_start: 1
 proactive_quiet_end: 7
 proactive_tick_seconds: 60
+
+# 睡眠独立询问（窗口内每小时问一次要不要睡）
+sleep_ask_enabled: true
+sleep_ask_interval_minutes: 60
+sleep_ask_protect_minutes: 10

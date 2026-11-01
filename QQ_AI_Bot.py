@@ -3107,6 +3107,90 @@ def _pro_roll_day(now):
         _pro_sends_today = 0
 
 
+def _sleep_ask_decide(now):
+    """问模型：现在要不要去睡。返回 decision dict。"""
+    try:
+        _time_s = time.strftime("%H:%M", time.localtime(now))
+    except Exception:
+        _time_s = "深夜"
+    _ctx = ""
+    try:
+        _d = _emo_dominant()
+        if _d:
+            _ctx += f"你现在的心情：{_d.get('label')}。"
+        _last = max([_pro_human_ts(f"p{u}") for u in (ALLOWED_USERS or [])] or [0])
+        if _last and now - _last < 2 * 3600:
+            _ctx += "刚才还有人跟你说话。"
+        else:
+            _ctx += "这会儿没人说话。"
+    except Exception:
+        pass
+    _sys = (f"现在是 {_time_s}。你是活人，会困。判断你要不要现在去睡。"
+            "困了/夜深了/聊累了/没人说话 → sleep；还想再待会儿 → stay。"
+            + _ctx +
+            "只输出 JSON：{\"action\":\"sleep\"或\"stay\",\"reason\":\"一句话\","
+            "\"message\":\"睡前想说的话（可为空）\"}")
+    try:
+        raw = _pro_llm([{"role": "system", "content": _sys},
+                        {"role": "user", "content": "现在要睡吗？"}], max_tokens=200)
+        return _pro_parse_json(raw) or {}
+    except Exception as e:
+        print(f"⚠️ 睡眠询问失败：{e}")
+        return {}
+
+
+async def _sleep_ask_loop(websocket):
+    """睡眠窗口内每个询问周期问一次 AI 要不要睡；正常对话期间自动推迟。"""
+    global _sleep_next_ask
+    await asyncio.sleep(30)
+    print(f"😴 睡眠询问已启动：窗口内每 {SLEEP_ASK_INTERVAL} 分钟问一次")
+    while True:
+        try:
+            await asyncio.sleep(30)
+            if not SLEEP_ASK_ENABLED or not SLEEP_ENABLED or not SLEEP_TOKEN:
+                continue
+            now = time.time()
+            if not _sleep_now_ok(now):
+                _sleep_next_ask = now + 1800      # 不在窗口内，半小时后再看
+                continue
+            if now < _sleep_next_ask:
+                continue
+            # 保护：最近有正常对话 → 推迟，别聊着聊着去睡
+            if _pro_last_api_ts and now - _pro_last_api_ts < SLEEP_ASK_PROTECT * 60:
+                _sleep_next_ask = now + min(SLEEP_ASK_INTERVAL, 15) * 60
+                print("😴 睡眠询问推迟：刚才还在聊天")
+                continue
+            _sleep_next_ask = now + SLEEP_ASK_INTERVAL * 60
+            _dec = await asyncio.to_thread(_sleep_ask_decide, now)
+            _act = str((_dec or {}).get("action") or "").strip().lower()
+            if _act != "sleep":
+                print(f"😴 询问要不要睡：先不睡（{( _dec or {}).get('reason','') }）")
+                continue
+            _reason = str(_dec.get("reason") or "困了")[:100]
+            _gn = str(_dec.get("message") or "").strip()
+            # 找最近说过话的人作为晚安对象（24h 内）
+            _target = 0
+            try:
+                _best = 0
+                for _u in (ALLOWED_USERS or []):
+                    _t = _pro_human_ts(f"p{_u}")
+                    if _t > _best and now - _t < 24 * 3600:
+                        _best, _target = _t, _u
+            except Exception:
+                _target = 0
+            print(f"😴 决定去睡：{_reason}")
+            if _target:
+                _sync_sleep(False, _target, _reason, _gn)
+            else:
+                _sync_sleep(False, 0, _reason, "")
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️ 睡眠询问循环异常：{e}")
+            await asyncio.sleep(60)
+
+
 async def _proactive_loop(websocket):
     """主动消息：冲动引擎。每 60 秒评估一次「现在有多想开口」，按概率触发。
     触发源：安静太久 / 想你 / 无聊 / 对方情绪不好 / 被晾 / 早晚时段。"""
@@ -3635,8 +3719,12 @@ SLEEP_MIN_HOURS = 8
 SLEEP_MAX_HOURS = 10
 SLEEP_WINDOW_START = 20                # 20:00 起允许睡觉
 SLEEP_WINDOW_END = 5                   # 05:00 后不再允许
+SLEEP_ASK_ENABLED = True               # 睡眠窗口内单独定时询问要不要睡
+SLEEP_ASK_INTERVAL = 60                # 拒绝后隔多少分钟再问
+SLEEP_ASK_PROTECT = 10                 # 最近多少分钟有正常对话就推迟问
 _sleep_wake_info = None                # 启动时检测到的起床信息
 _sleep_offline_until = 0.0             # 这段时间内的旧消息只缓存不回复
+_sleep_next_ask = 0.0                  # 下一次问"要不要睡"的时间
 _startup_ts = 0.0
 
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
@@ -4202,7 +4290,8 @@ def _sleep_now_ok(now=None) -> bool:
     """当前是否在允许睡觉的时间窗内（支持跨午夜，如 20:00~05:00）"""
     if not SLEEP_ENABLED:
         return False
-    h = (now or time.localtime()).tm_hour
+    _tm = now if hasattr(now, "tm_hour") else time.localtime(now or time.time())
+    h = _tm.tm_hour
     s0, e0 = SLEEP_WINDOW_START, SLEEP_WINDOW_END
     if s0 <= e0:
         return s0 <= h < e0
@@ -7716,6 +7805,10 @@ async def main():
 
         print(f"💬 自由聊天：开关={'开' if ENABLE_RANDOM_CHAT else '关'}，触发概率={CHAT_TRIGGER_PROBABILITY:.0%}，回复后延续{FOLLOW_UP_TRIGGER_COUNT}条")
         # AI主动消息常驻协程（静默→随机延迟→AI选目标找话题→冷却 循环）
+        if SLEEP_ENABLED:
+            _sa = asyncio.create_task(_sleep_ask_loop(ws))
+            _bg_tasks.add(_sa)
+            _sa.add_done_callback(_bg_tasks.discard)
         if ENABLE_PROACTIVE_MSG:
             _pro_task = asyncio.create_task(_proactive_loop(ws))
             _bg_tasks.add(_pro_task)
@@ -8581,6 +8674,10 @@ def _load_config_file():
     SLEEP_MAX_HOURS = i("sleep_max_hours", SLEEP_MAX_HOURS)
     SLEEP_WINDOW_START = i("sleep_window_start", SLEEP_WINDOW_START)
     SLEEP_WINDOW_END = i("sleep_window_end", SLEEP_WINDOW_END)
+    global SLEEP_ASK_ENABLED, SLEEP_ASK_INTERVAL, SLEEP_ASK_PROTECT
+    SLEEP_ASK_ENABLED = b("sleep_ask_enabled", SLEEP_ASK_ENABLED)
+    SLEEP_ASK_INTERVAL = i("sleep_ask_interval_minutes", SLEEP_ASK_INTERVAL)
+    SLEEP_ASK_PROTECT = i("sleep_ask_protect_minutes", SLEEP_ASK_PROTECT)
     _tts_engine = s("tts_engine", "")
     if _tts_engine:
         TTS_ENGINE = _tts_engine
