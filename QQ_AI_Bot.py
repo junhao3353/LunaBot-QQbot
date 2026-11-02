@@ -3106,6 +3106,31 @@ def _sleep_ask_decide(now):
     except Exception:
         _time_s = "深夜"
     _ctx = ""
+    # 人设/说话风格
+    try:
+        _ps = (SYSTEM_PROMPT or "").strip()
+        if _ps:
+            _ctx += "你的人设和说话风格：" + _ps[:300] + "。"
+    except Exception:
+        pass
+    # 最近聊天原文
+    try:
+        _tgt = 0
+        _best = 0
+        for _u in (ALLOWED_USERS or []):
+            _t = _pro_human_ts(f"p{_u}")
+            if _t > _best and now - _t < 24 * 3600:
+                _best, _tgt = _t, _u
+        if _tgt:
+            _his = list(group_history.get(f"p_{_tgt}", []))[-6:]
+            _lines = [f"{'他' if m.get('role') == 'user' else '你'}：{str(m.get('content'))[:60]}" for m in _his if m.get("content")]
+            if _lines:
+                _ctx += "你们最近聊的：" + " / ".join(_lines) + "。"
+    except Exception:
+        pass
+    # 上次晚安别重复
+    if _sleep_last_gn:
+        _ctx += f"你上次睡前说的是「{_sleep_last_gn[:40]}」，这次别再重复同样的句式。"
     try:
         _d = _emo_dominant()
         if _d:
@@ -3120,7 +3145,9 @@ def _sleep_ask_decide(now):
     _sys = (f"现在是 {_time_s}。你是活人，会困。判断你要不要现在去睡。"
             "困了/夜深了/聊累了/没人说话 → sleep；还想再待会儿 → stay。"
             + _ctx +
-            "睡前可以留一句话（可选，不是必须）：如果你们关系正常、气氛合适，就留一句自然的晚安；"
+            "睡前可以留一句话（可选，不是必须）：要像你平时说话那样自然，一句话就够，"
+            "别用固定模板（不要每次都\"我先睡啦，晚安，明天见\"），可以顺手提一句刚才聊的内容；"
+            "如果你们关系正常、气氛合适，就留一句；"
             "如果正在闹别扭、他刚才没理你、或者关系一般，就别发，安静睡——"
             "这会儿突然发消息会很突兀。"
             "只输出 JSON：{\"action\":\"sleep\"或\"stay\",\"reason\":\"一句话\","
@@ -3187,9 +3214,12 @@ async def _sleep_ask_loop(websocket):
             print(f"😴 决定去睡：{_reason}")
             if _target and _gn:
                 await _sleep_request_async(_reason, _gn, _target)
+                if _sleep_pending:
+                    continue      # 已进入睡眠倒计时，继续在循环里等，不能退出
+                return
             else:
                 await asyncio.to_thread(_sync_sleep, False, 0, _reason, "")
-            return
+                return
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3733,6 +3763,8 @@ _sleep_wake_info = None                # 启动时检测到的起床信息
 _sleep_offline_until = 0.0             # 这段时间内的旧消息只缓存不回复
 _sleep_next_ask = 0.0                  # 下一次问"要不要睡"的时间
 _sleep_pending = None                  # 已发晚安、等待回复的睡眠请求
+_sleep_last_gn = ""                    # 上次晚安原文
+_sleep_gn_ts = 0.0                     # 上次晚安时间
 _startup_ts = 0.0
 
 ENABLE_MERGE = True                 # 总开关：true=收到消息先等MERGE_WAIT_SECONDS秒，期间有新消息就重置计时，攒成一次AI回复；false=每条立即单独回复
@@ -4453,7 +4485,17 @@ def _sleep_pending_tick(now):
 
 async def _sleep_request_async(reason, goodnight="", target=0):
     """事件循环里调用：await 发晚安，再决定等待还是下线（避免跨线程死锁）。"""
-    global _sleep_pending
+    global _sleep_pending, _sleep_last_gn, _sleep_gn_ts
+    # 同一晚已经说过晚安就不再重复说
+    if goodnight and time.time() - _sleep_gn_ts < 8 * 3600:
+        print("😴 今晚已经说过晚安了，不再重复，直接进睡眠倒计时")
+        goodnight = ""
+    if target and not goodnight:
+        # 不再发消息，但仍在睡眠倒计时里等 15 分钟（期间有消息会重置）
+        _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
+                          "target": int(target), "reason": reason,
+                          "sent_at": time.time()}
+        return f"✅ 已说过晚安，安静等 {SLEEP_REPLY_WAIT} 分钟后下线"
     if goodnight and target:
         _ok = False
         for _i in range(2):
@@ -4465,6 +4507,8 @@ async def _sleep_request_async(reason, goodnight="", target=0):
                 print(f"⚠️ 晚安发送失败（第{_i+1}次）：{e}")
                 await asyncio.sleep(2)
         if _ok:
+            _sleep_last_gn = goodnight
+            _sleep_gn_ts = time.time()
             try:
                 _pro_append_history("private", int(target), [goodnight])
             except Exception as _he:
