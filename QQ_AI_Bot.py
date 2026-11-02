@@ -4409,31 +4409,40 @@ def _sleep_request(reason, goodnight="", target=0):
     return "✅ 已进入睡眠"
 
 
+def _sleep_touch(user_id=None):
+    """睡眠倒计时中收到消息：重置 15 分钟。"""
+    global _sleep_pending
+    if not _sleep_pending:
+        return
+    try:
+        now = time.time()
+        _sleep_pending["deadline"] = now + SLEEP_REPLY_WAIT * 60
+        _sleep_pending["last_touch"] = now
+        print(f"⏳ 收到消息，睡眠倒计时重置为 {SLEEP_REPLY_WAIT} 分钟后下线")
+    except Exception:
+        pass
+
+
 def _sleep_wait_hint() -> str:
-    """发晚安等待回复期间：告诉模型“你只是说了晚安，还没真睡”。"""
+    """睡眠倒计时中：告诉模型处于睡眠模式、还有多久下线、可以唤醒。"""
     if not _sleep_pending:
         return ""
     try:
         _mins = max(1, int((float(_sleep_pending.get("deadline") or 0) - time.time()) / 60))
     except Exception:
         _mins = 1
-    return (f"\n\n【睡眠状态】你刚才跟他说了晚安，现在在等他回复（大约还有 {_mins} 分钟），"
-            "你还没真的睡。如果他回了，就正常聊；别自己先说「我去睡了」或「我已经睡了」。")
+    return ("\n\n【睡眠模式】你已经在睡眠模式里了，大约 {_m} 分钟后安静下线；"
+            "这段时间只要有人发消息，倒计时就会重新开始。你还没真的睡。"
+            "如果还想继续聊、或者对方叫你，可以调用 wake_up 结束睡眠模式、恢复正常。"
+            "不要再调用 sleep 工具，也不要说「我去睡了」「我已经睡了」。").replace("{_m}", str(_mins))
 
 
 def _sleep_pending_tick(now):
-    """检查"已发晚安等回复"的状态：replied / timeout / wait。"""
+    """检查睡眠倒计时：wait=还在倒计时，timeout=时间到该下线。"""
     global _sleep_pending
     p = _sleep_pending
     if not p:
         return None
-    try:
-        _rep = _pro_human_ts(f"p{p['target']}")
-    except Exception:
-        _rep = 0
-    if _rep > float(p.get("sent_at") or 0):
-        _sleep_pending = None
-        return {"action": "replied", "target": p.get("target"), "reason": p.get("reason")}
     if now >= float(p.get("deadline") or 0):
         _sleep_pending = None
         return {"action": "timeout", "target": p.get("target"), "reason": p.get("reason")}
@@ -6064,6 +6073,19 @@ def _image_tool_def():
     }
 
 
+def _wake_tool_def():
+    """结束睡眠模式（睡眠倒计时中想继续聊时用）。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": "wake_up",
+            "description": ("结束睡眠模式、恢复正常清醒状态。当你在睡眠倒计时里但还想继续聊、"
+                            "或者对方叫你/你突然不想睡了，就调用它。"),
+            "parameters": {"type": "object", "properties": {}},
+        }
+    }
+
+
 def _sleep_tool_def():
     """睡觉工具：只在允许的时间窗外就不下发（由调用方控制）"""
     return {
@@ -6078,7 +6100,7 @@ def _sleep_tool_def():
                 "type": "object",
                 "properties": {
                     "reason": {"type": "string", "description": "为什么要睡（一句话，会写日志）"},
-                    "goodnight": {"type": "string", "description": "可选：睡前想留的一句话。关系好/气氛合适才发；正在闹别扭或对方没理你，就别发，安静睡"}
+                    "goodnight": {"type": "string", "description": "可选：睡前想留的一句话。如果聊天记录里已经说过晚安，或不想跟某人说话，就别发，直接睡；关系好/气氛合适才补一句"}
                 },
                 "required": ["reason"]
             }
@@ -6632,7 +6654,9 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     # 文生图工具:AI自主决定什么时候画图
     if ENABLE_IMAGE_TOOL and (QWEN_IMAGE_API_KEY or EMBEDDING_API_KEY):
         tools.append(_image_tool_def())
-    if _sleep_now_ok():
+    if _sleep_pending:
+        tools.append(_wake_tool_def())
+    elif _sleep_now_ok():
         tools.append(_sleep_tool_def())
     if ENABLE_PROACTIVE_QZONE:
         tools.append({
@@ -6727,7 +6751,9 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.add("generate_image")
     if ENABLE_PROACTIVE_QZONE:
         _runnable_names.add("post_qzone")
-    if _sleep_now_ok():
+    if _sleep_pending:
+        _runnable_names.add("wake_up")
+    elif _sleep_now_ok():
         _runnable_names.add("sleep")
     _runnable_names.add("send_to_user")  # 主动私聊工具：无条件下发，也必须无条件可执行
     if ENABLE_EMOJI and EMOJI_MAP:
@@ -6911,6 +6937,14 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "❌ prompt参数为空,未生成图片"})
+                continue
+
+            if _tool_name == "wake_up":
+                global _sleep_pending
+                _sleep_pending = None
+                print("☀️ 结束睡眠模式，恢复正常")
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                 "content": "✅ 已结束睡眠模式，恢复清醒，正常聊天"})
                 continue
 
             if _tool_name == "sleep":
@@ -8428,6 +8462,7 @@ async def main():
                     display_text = "[回复] " + display_text
 
                 # ===== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====
+                _sleep_touch(user_id)
                 await _emo_observe_async(user_id, user_text)
                 if ENABLE_MERGE:
                     _merge_buf.setdefault(chat_id, []).append({
