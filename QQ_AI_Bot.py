@@ -2904,6 +2904,8 @@ async def _proactive_trigger(websocket, wake_reason=None, trigger_reason=None):
         print(f"⚠️ 主动消息：AI选了非法/被排除/正在聊的目标 {target_type} {target_id}，放弃")
         return
 
+    key = f"g{target_id}" if target_type == "group" else f"p{target_id}"
+
     try:
         # 逐条发，多条中间停2-5秒像真人打字
         for _i, _m in enumerate(messages_to_send):

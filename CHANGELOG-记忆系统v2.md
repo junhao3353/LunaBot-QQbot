@@ -497,3 +497,5 @@ embedding_dim: 1024
   - 睡眠模式中收回 sleep 工具，改为下发 wake_up：提示词说明"你在睡眠模式里，还没真睡，可以 wake_up 结束"
   - wake_up 调用后清空睡眠状态，恢复正常聊天
   - sleep 工具 goodnight 说明补充：聊天记录里已经说过晚安、或不想跟某人说话，就别再发，直接睡
+
+- 修复主动消息 NameError（2026-11-02）：删活跃拦截时把 key 变量定义一起删了，导致发送时 name 'key' is not defined；已补回 key = g/p + target_id
