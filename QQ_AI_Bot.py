@@ -4411,8 +4411,8 @@ def _sleep_request(reason, goodnight="", target=0):
     return "✅ 已进入睡眠"
 
 
-def _sleep_touch(user_id=None):
-    """睡眠倒计时中收到消息：重置 15 分钟。"""
+def _sleep_touch(user_id=None, reason="收到消息"):
+    """睡眠倒计时中「有人跟你说话/你回了话」：重置 15 分钟。"""
     global _sleep_pending
     if not _sleep_pending:
         return
@@ -4420,7 +4420,7 @@ def _sleep_touch(user_id=None):
         now = time.time()
         _sleep_pending["deadline"] = now + SLEEP_REPLY_WAIT * 60
         _sleep_pending["last_touch"] = now
-        print(f"⏳ 收到消息，睡眠倒计时重置为 {SLEEP_REPLY_WAIT} 分钟后下线")
+        print(f"⏳ {reason}，睡眠倒计时重置为 {SLEEP_REPLY_WAIT} 分钟后下线")
     except Exception:
         pass
 
@@ -7758,6 +7758,8 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
 
     # 主动消息：任何群/私聊正常API对话完成，重置全局静默计时（回到idle）
     _pro_reset_by_api()
+    # 睡眠倒计时：你真的回了话，重置（说明还醒着）
+    _sleep_touch(user_id, "你回复了消息")
 
 
 def _on_input_status(data):
@@ -8464,7 +8466,8 @@ async def main():
                     display_text = "[回复] " + display_text
 
                 # ===== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====
-                _sleep_touch(user_id)
+                if not is_group:
+                    _sleep_touch(user_id)
                 await _emo_observe_async(user_id, user_text)
                 if ENABLE_MERGE:
                     _merge_buf.setdefault(chat_id, []).append({
