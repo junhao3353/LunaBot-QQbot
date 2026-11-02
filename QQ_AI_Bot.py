@@ -3100,61 +3100,74 @@ def _pro_roll_day(now):
 
 
 def _sleep_ask_decide(now):
-    """问模型：现在要不要去睡。返回 decision dict。"""
+    """问模型：现在要不要去睡。给足上下文（人设/最近聊天/自己说过的话/当前在等什么）。"""
     try:
         _time_s = time.strftime("%H:%M", time.localtime(now))
     except Exception:
         _time_s = "深夜"
-    _ctx = ""
+    _ctx = []
     # 人设/说话风格
     try:
         _ps = (SYSTEM_PROMPT or "").strip()
         if _ps:
-            _ctx += "你的人设和说话风格：" + _ps[:300] + "。"
+            _ctx.append("你的人设和说话风格：" + _ps[:300])
     except Exception:
         pass
-    # 最近聊天原文
+    # 找最近聊过的人
+    _tgt, _best = 0, 0
     try:
-        _tgt = 0
-        _best = 0
         for _u in (ALLOWED_USERS or []):
             _t = _pro_human_ts(f"p{_u}")
             if _t > _best and now - _t < 24 * 3600:
                 _best, _tgt = _t, _u
+    except Exception:
+        _tgt = 0
+    # 最近聊天原文（完整一点，像正常聊天）
+    try:
         if _tgt:
-            _his = list(group_history.get(f"p_{_tgt}", []))[-6:]
-            _lines = [f"{'他' if m.get('role') == 'user' else '你'}：{str(m.get('content'))[:60]}" for m in _his if m.get("content")]
+            _his = list(group_history.get(f"p_{_tgt}", []))[-12:]
+            _lines = [f"{'他' if m.get('role') == 'user' else '你'}：{str(m.get('content'))[:80]}"
+                      for m in _his if m.get("content")]
             if _lines:
-                _ctx += "你们最近聊的：" + " / ".join(_lines) + "。"
+                _ctx.append("你们最近的聊天：\n" + "\n".join(_lines))
     except Exception:
         pass
-    # 上次晚安别重复
-    if _sleep_last_gn:
-        _ctx += f"你上次睡前说的是「{_sleep_last_gn[:40]}」，这次别再重复同样的句式。"
+    # 你自己最近主动说过的话
+    try:
+        if _pro_self_said:
+            _ctx.append("你最近主动说过：" + " / ".join(str(x.get("text"))[:40] for x in _pro_self_said[-3:]))
+    except Exception:
+        pass
+    # 当前心情
     try:
         _d = _emo_dominant()
         if _d:
-            _ctx += f"你现在的心情：{_d.get('label')}。"
-        _last = max([_pro_human_ts(f"p{u}") for u in (ALLOWED_USERS or [])] or [0])
-        if _last and now - _last < 2 * 3600:
-            _ctx += "刚才还有人跟你说话。"
-        else:
-            _ctx += "这会儿没人说话。"
+            _ctx.append(f"你现在的心情：{_d.get('label')}")
     except Exception:
         pass
-    _sys = (f"现在是 {_time_s}。你是活人，会困。判断你要不要现在去睡。"
-            "困了/夜深了/聊累了/没人说话 → sleep；还想再待会儿 → stay。"
-            + _ctx +
-            "睡前可以留一句话（可选，不是必须）：要像你平时说话那样自然，一句话就够，"
-            "别用固定模板（不要每次都\"我先睡啦，晚安，明天见\"），可以顺手提一句刚才聊的内容；"
-            "如果你们关系正常、气氛合适，就留一句；"
-            "如果正在闹别扭、他刚才没理你、或者关系一般，就别发，安静睡——"
-            "这会儿突然发消息会很突兀。"
+    # 当前状态：在等什么
+    _state = []
+    if _sleep_pending:
+        _left = max(1, int((float(_sleep_pending.get("deadline") or 0) - now) / 60))
+        _state.append(f"你已经在睡眠模式里，倒计时还剩约 {_left} 分钟（有人发消息会重置）")
+    else:
+        _state.append("你现在没有在等什么特别的事")
+    if _sleep_last_gn:
+        _state.append(f"你今晚已经说过一次晚安：「{_sleep_last_gn[:40]}」")
+    _ctx.append("你现在的状态：" + "；".join(_state))
+
+    _sys = (f"现在是 {_time_s}。你是活人，困了要睡。先看下面你们刚聊的内容和你自己的状态，"
+            "想清楚你现在在做什么：在聊天？在等对方回话？还是已经说了晚安该睡了？\n"
+            + "\n".join(_ctx) + "\n"
+            "然后决定：sleep 去睡，stay 再待会儿。如果决定睡，可以在 message 里留一句自然的话（可空）："
+            "像平时说话一样，一句话到两句话，可以呼应刚才聊的内容；"
+            "如果你刚刚已经说过晚安、只是没等到回复，就别再机械地重复同一句，"
+            "可以自然点（比如「那我先躺了，你回我我再醒」），也可以什么都不说。"
             "只输出 JSON：{\"action\":\"sleep\"或\"stay\",\"reason\":\"一句话\","
             "\"message\":\"睡前想说的话（可空）\"}")
     try:
         raw = _pro_llm([{"role": "system", "content": _sys},
-                        {"role": "user", "content": "现在要睡吗？"}], max_tokens=200)
+                        {"role": "user", "content": "现在要睡吗？"}], max_tokens=220)
         return _pro_parse_json(raw) or {}
     except Exception as e:
         print(f"⚠️ 睡眠询问失败：{e}")
@@ -4486,16 +4499,6 @@ def _sleep_pending_tick(now):
 async def _sleep_request_async(reason, goodnight="", target=0):
     """事件循环里调用：await 发晚安，再决定等待还是下线（避免跨线程死锁）。"""
     global _sleep_pending, _sleep_last_gn, _sleep_gn_ts
-    # 同一晚已经说过晚安就不再重复说
-    if goodnight and time.time() - _sleep_gn_ts < 8 * 3600:
-        print("😴 今晚已经说过晚安了，不再重复，直接进睡眠倒计时")
-        goodnight = ""
-    if target and not goodnight:
-        # 不再发消息，但仍在睡眠倒计时里等 15 分钟（期间有消息会重置）
-        _sleep_pending = {"deadline": time.time() + SLEEP_REPLY_WAIT * 60,
-                          "target": int(target), "reason": reason,
-                          "sent_at": time.time()}
-        return f"✅ 已说过晚安，安静等 {SLEEP_REPLY_WAIT} 分钟后下线"
     if goodnight and target:
         _ok = False
         for _i in range(2):
