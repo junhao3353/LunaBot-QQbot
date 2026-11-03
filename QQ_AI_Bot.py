@@ -1004,12 +1004,48 @@ class MemoryV2:
             lines.append(self._member_line(qq, u, extra))
         return "\n".join(lines)
 
+    def _member_pinyin(self, qq, u):
+        """缓存成员的拼音/首字母（同音字搜索用）。"""
+        try:
+            key = f"{qq}|{u.get('nickname')}|" + "|".join(
+                f"{g.get('card')}|{g.get('group_name')}" for g in (u.get("groups") or {}).values())
+            cache = getattr(self, "_pinyin_cache", None)
+            if cache is None:
+                cache = self._pinyin_cache = {}
+            if key in cache:
+                return cache[key]
+            from pypinyin import lazy_pinyin
+            _pys = list(lazy_pinyin(str(u.get("nickname") or "")))
+            for g in (u.get("groups") or {}).values():
+                _pys += list(lazy_pinyin(str(g.get("card") or "")))
+                _pys += list(lazy_pinyin(str(g.get("group_name") or "")))
+            full = "".join(_pys).lower()
+            initials = "".join(p[0] for p in _pys if p).lower()
+            cache[key] = (full, initials)
+            if len(cache) > 500:
+                cache.clear()
+            return cache[key]
+        except Exception:
+            return ("", "")
+
     def search_members(self, query, limit=8):
-        """搜索全部成员：QQ号、昵称/名片/群名子串、拼音模糊、编辑距离。"""
+        """搜索全部成员：QQ号、昵称/名片/群名子串、同音字/拼音、首字母、编辑距离。
+        专治语音转文字的歪词：说"忻澈"被转成"新撤"，拼音都是 xinche，也能搜到。"""
         _q = str(query or "").strip()
         if not _q:
             return "❌ 搜索词为空"
         _ql = _q.lower()
+        # 查询词的各种形态
+        _qp, _qi = "", ""
+        try:
+            from pypinyin import lazy_pinyin
+            _q_pys = lazy_pinyin(_q)
+            _qp = "".join(_q_pys).lower()
+            _qi = "".join(p[0] for p in _q_pys if p).lower()
+        except Exception:
+            pass
+        # 把查询里的中文/英文片段拆开，也各试一遍（比如"新撤在吗"）
+        _frags = [x for x in __import__("re").split(r"[^0-9A-Za-z\u4e00-\u9fff]+", _q) if x]
         users = self.all_members.get("users") or {}
         hits = []
         for qq, u in users.items():
@@ -1018,30 +1054,40 @@ class MemoryV2:
             for g in (u.get("groups") or {}).values():
                 blob_parts += [str(g.get("card") or ""), str(g.get("group_name") or "")]
             _blob = " ".join(blob_parts)
-            # QQ 号：完全/包含
+            # 1) QQ 号
             if _q.isdigit():
                 if _q == str(qq):
                     score = 100
                 elif _q in str(qq):
                     score = 80
-            # 子串
+            # 2) 原样子串
             if not score and _ql in _blob.lower():
                 score = 70
-            # 拼音/首字母模糊
+            # 3) 同音字 / 拼音 / 首字母
             if not score:
-                try:
-                    from pypinyin import lazy_pinyin
-                    _pys = lazy_pinyin(u.get("nickname") or "")
-                    for g in (u.get("groups") or {}).values():
-                        _pys = list(_pys) + list(lazy_pinyin(str(g.get("card") or "")))
-                        _pys = list(_pys) + list(lazy_pinyin(str(g.get("group_name") or "")))
-                    _py = "".join(_pys).lower()
-                    _initials = "".join(p[0] for p in _pys if p).lower()
-                    if _ql and (_ql in _py or _ql in _initials):
-                        score = 60
-                except Exception:
-                    pass
-            # 编辑距离（打字歪）
+                _py, _ini = self._member_pinyin(qq, u)
+                if _py:
+                    if _qp and _qp == _py:
+                        score = 68          # 完全同音：忻澈 = 新撤 = xinche
+                    elif _qp and (_qp in _py or _qp in _ini):
+                        score = 62
+                    elif _qi and _qi in _ini:
+                        score = 60          # 首字母：xc
+                    elif _qp and _edit_distance(_qp, _py) <= 1:
+                        score = 55          # 拼音差一点：xingche / xinche
+                    else:
+                        for _f in _frags:
+                            if len(_f) < 2:
+                                continue
+                            try:
+                                from pypinyin import lazy_pinyin as _lp
+                                _fp = "".join(_lp(_f)).lower()
+                            except Exception:
+                                _fp = ""
+                            if _fp and (_fp == _py or _fp in _py):
+                                score = 58
+                                break
+            # 4) 汉字编辑距离（打错字）
             if not score and len(_q) >= 2:
                 _nick = str(u.get("nickname") or "")
                 if _nick and _edit_distance(_q, _nick) <= max(1, len(_q) // 3):
