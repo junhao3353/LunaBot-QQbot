@@ -703,7 +703,8 @@ MEMORY_FULL_INJECT_MAX_CHARS = 200000
 MEMORY_RECENT_SPEAKERS = 8
 MEMORY_DIGEST_ENABLED = True
 MEMORY_DIGEST_MAX = 20
-MEMORY_OTHER_CONTEXT_MSGS = 5   # 异类会话（私聊里看群/群里看私聊）只带最近几条
+MEMORY_OTHER_CONTEXT_MSGS = 5
+MEMBER_ACTIVE_DAYS = 15          # 活跃成员：这么多天没说话就从活跃表移除   # 异类会话（私聊里看群/群里看私聊）只带最近几条
 
 _mem = None
 _mem_lock = threading.RLock()
@@ -763,15 +764,38 @@ class MemoryV2:
         self.profiles_path = os.path.join(self.dir, "profiles.json")
         self.temp_path = os.path.join(self.dir, "temp.json")
         self.userinfo_path = os.path.join(self.dir, "userinfo.json")
+        self.members_all_path = os.path.join(self.dir, "members_all.json")
+        self.members_active_path = os.path.join(self.dir, "members_active.json")
         self.compress_log = os.path.join(self.dir, "compress.log")
         self.profiles = _mem_load_json(self.profiles_path, {"users": {}, "global": {"entries": [], "summary": ""}})
         self.temp = _mem_load_json(self.temp_path, {"contexts": {}, "qzone": [], "memos": [], "recent_speakers": [], "warned": False})
-        self.userinfo = _mem_load_json(self.userinfo_path, {"users": {}, "updated_at": 0})
+        # 全部成员（不进上下文，供 search_members 搜索）
+        self.all_members = _mem_load_json(self.members_all_path, {"users": {}, "updated_at": 0})
+        if not (self.all_members.get("users")):
+            _old = _mem_load_json(self.userinfo_path, {"users": {}, "updated_at": 0})
+            if _old.get("users"):
+                self.all_members = _old
+                print(f"👥 成员数据已迁移：userinfo.json → members_all.json（{len(_old['users'])} 人）")
+        # 活跃成员（进上下文，15 天不说话自动过期；私聊白名单永久）
+        self.active_members = _mem_load_json(self.members_active_path, {"users": {}})
+        self.userinfo = self.all_members   # 兼容旧代码
         self.profiles.setdefault("users", {})
         self.profiles.setdefault("global", {"entries": [], "summary": ""})
         for k, v in (("contexts", {}), ("qzone", []), ("digest", []), ("memos", []), ("recent_speakers", []), ("offline", []), ("warned", False)):
             self.temp.setdefault(k, v)
-        self.userinfo.setdefault("users", {})
+        self.all_members.setdefault("users", {})
+        self.active_members.setdefault("users", {})
+        # 私聊白名单：种进活跃表并永久锁定
+        for _u in (ALLOWED_USERS or []):
+            try:
+                _q = str(int(_u))
+            except Exception:
+                continue
+            if _q not in self.active_members["users"]:
+                _base = dict(self.all_members["users"].get(_q) or {"nickname": "", "groups": {}})
+                _base["last_active"] = time.time()
+                _base["locked"] = True
+                self.active_members["users"][_q] = _base
         self._save_profiles(); self._save_temp(); self._save_userinfo()
         print(f"🧠 记忆系统已加载：{len(self.profiles['users'])}个画像，"
               f"{len(self.profiles['global']['entries'])}条全局备忘，{len(self.temp['contexts'])}个会话上下文")
@@ -786,7 +810,12 @@ class MemoryV2:
 
     def _save_userinfo(self):
         with _mem_lock:
-            _mem_atomic_write(self.userinfo_path, self.userinfo)
+            _mem_atomic_write(self.members_all_path, self.all_members)
+        self._save_active()
+
+    def _save_active(self):
+        with _mem_lock:
+            _mem_atomic_write(self.members_active_path, self.active_members)
 
     # ---------- 画像 ----------
     def ensure_user(self, qq, nickname=""):
@@ -913,10 +942,123 @@ class MemoryV2:
             self.temp["qzone"] = self.temp["qzone"][-MEMORY_QZONE_MAX:]
             self._save_temp()
 
-    # ---------- 用户信息 ----------
+    # ---------- 成员信息（全部/活跃） ----------
+    def _member_line(self, qq, u, extra=""):
+        gs = []
+        for gid, g in (u.get("groups") or {}).items():
+            tag = []
+            if g.get("group_name"): tag.append(f"群名 {g['group_name']}")
+            if g.get("card"): tag.append(f"名片 {g['card']}")
+            if g.get("role"): tag.append({"owner": "群主", "admin": "管理员", "member": "群员"}.get(g["role"], g["role"]))
+            if g.get("level"): tag.append(f"等级 {g['level']}")
+            gs.append(f"在群 {gid}（{'，'.join(tag)}）")
+        return f"QQ {qq} 昵称 {u.get('nickname') or '无'}" + (f"；{'；'.join(gs)}" if gs else "") + (f"；{extra}" if extra else "")
+
+    def touch_active(self, qq, nickname=None):
+        """有人说话：写入/刷新活跃表（私聊白名单永久保留）。"""
+        try:
+            _qq = str(int(qq))
+        except Exception:
+            return
+        with _mem_lock:
+            base = dict(self.all_members["users"].get(_qq) or {})
+            if not base:
+                base = {"nickname": str(nickname or ""), "groups": {}}
+            if nickname and not base.get("nickname"):
+                base["nickname"] = str(nickname)
+            base["last_active"] = time.time()
+            base["locked"] = _qq in {str(int(x)) for x in (ALLOWED_USERS or [])}
+            self.active_members["users"][_qq] = base
+        self._save_active()
+
+    def expire_active(self, days=MEMBER_ACTIVE_DAYS):
+        """把超过 N 天没说话的活跃成员移除（私聊白名单不删）。"""
+        _limit = time.time() - days * 86400
+        removed = []
+        with _mem_lock:
+            _lock_qqs = {str(int(x)) for x in (ALLOWED_USERS or [])}
+            for qq, u in list(self.active_members["users"].items()):
+                if qq in _lock_qqs or u.get("locked"):
+                    continue
+                if float(u.get("last_active") or 0) < _limit:
+                    self.active_members["users"].pop(qq, None)
+                    removed.append(qq)
+        if removed:
+            self._save_active()
+            print(f"👥 活跃成员过期移除 {len(removed)} 人（{days}天没说话）：{', '.join(removed[:10])}")
+        return removed
+
+    def render_active(self):
+        """活跃成员信息（进上下文）。排序固定，减少缓存抖动。"""
+        users = self.active_members.get("users") or {}
+        if not users:
+            return ""
+        lines = []
+        for qq in sorted(users.keys(), key=lambda x: (len(x), x)):
+            u = users[qq]
+            _ts = float(u.get("last_active") or 0)
+            _when = time.strftime("%m-%d", time.localtime(_ts)) if _ts else ""
+            extra = f"最近活跃 {_when}" if _when else ""
+            if u.get("locked"):
+                extra = (extra + "，私聊常驻") if extra else "私聊常驻"
+            lines.append(self._member_line(qq, u, extra))
+        return "\n".join(lines)
+
+    def search_members(self, query, limit=8):
+        """搜索全部成员：QQ号、昵称/名片/群名子串、拼音模糊、编辑距离。"""
+        _q = str(query or "").strip()
+        if not _q:
+            return "❌ 搜索词为空"
+        _ql = _q.lower()
+        users = self.all_members.get("users") or {}
+        hits = []
+        for qq, u in users.items():
+            score = 0
+            blob_parts = [str(qq), str(u.get("nickname") or "")]
+            for g in (u.get("groups") or {}).values():
+                blob_parts += [str(g.get("card") or ""), str(g.get("group_name") or "")]
+            _blob = " ".join(blob_parts)
+            # QQ 号：完全/包含
+            if _q.isdigit():
+                if _q == str(qq):
+                    score = 100
+                elif _q in str(qq):
+                    score = 80
+            # 子串
+            if not score and _ql in _blob.lower():
+                score = 70
+            # 拼音/首字母模糊
+            if not score:
+                try:
+                    from pypinyin import lazy_pinyin
+                    _pys = lazy_pinyin(u.get("nickname") or "")
+                    for g in (u.get("groups") or {}).values():
+                        _pys = list(_pys) + list(lazy_pinyin(str(g.get("card") or "")))
+                        _pys = list(_pys) + list(lazy_pinyin(str(g.get("group_name") or "")))
+                    _py = "".join(_pys).lower()
+                    _initials = "".join(p[0] for p in _pys if p).lower()
+                    if _ql and (_ql in _py or _ql in _initials):
+                        score = 60
+                except Exception:
+                    pass
+            # 编辑距离（打字歪）
+            if not score and len(_q) >= 2:
+                _nick = str(u.get("nickname") or "")
+                if _nick and _edit_distance(_q, _nick) <= max(1, len(_q) // 3):
+                    score = 50
+            if score:
+                hits.append((score, qq, u))
+        if not hits:
+            return f"没找到匹配「{_q}」的成员（共 {len(users)} 人）"
+        hits.sort(key=lambda x: (-x[0], x[1]))
+        lines = [f"找到 {len(hits)} 个匹配（共 {len(users)} 人），前 {min(limit, len(hits))} 个："]
+        for _sc, qq, u in hits[:limit]:
+            lines.append(self._member_line(qq, u))
+        return "\n".join(lines)
+
     def set_userinfo(self, qq, nickname=None, group_id=None, card=None, role=None, level=None, group_name=None, only_if_empty=False):
         with _mem_lock:
-            u = self.userinfo["users"].setdefault(str(qq), {"nickname": "", "groups": {}})
+            u = self.all_members["users"].setdefault(str(qq), {"nickname": "", "groups": {}})
             u.setdefault("groups", {})
             if nickname and (not only_if_empty or not u.get("nickname")) and str(nickname) != u.get("nickname"):
                 u["nickname"] = str(nickname)
@@ -927,7 +1069,7 @@ class MemoryV2:
                         g[k] = str(v)
 
     def save_userinfo(self):
-        self.userinfo["updated_at"] = time.time()
+        self.all_members["updated_at"] = time.time()
         self._save_userinfo()
 
     # ---------- 渲染 ----------
@@ -2220,9 +2362,9 @@ def _mem_prompt_parts(user_id, is_group, obj_id, cq_msg="", raw_msg="", userinfo
     gl = _mem.render_global()
     if gl:
         static_parts.append("【长期记忆·全局备忘】\n" + gl)
-    ui = _mem.render_userinfo(only_qqs=userinfo_qqs)
-    if ui:
-        static_parts.append("【用户信息（自动拉取）】\n" + ui)
+    _act = _mem.render_active()
+    if _act:
+        static_parts.append("【活跃成员（最近说过话的；全部成员可调用 search_members 搜索）】\n" + _act)
     try:
         _cur_key = (f"g_{int(obj_id)}" if is_group else f"p_{int(obj_id)}") if obj_id else None
     except Exception:
@@ -2253,6 +2395,42 @@ def _mem_prompt_block(user_id, is_group, obj_id, cq_msg="", raw_msg=""):
 
 
 # ---------- 工具 ----------
+def _members_tool_def():
+    """搜索全部成员名录的工具。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": "search_members",
+            "description": ("搜索群成员/私聊名录（全部成员，按QQ号、昵称、名片、群名，支持拼音/首字母模糊匹配）。"
+                            "想找某个人、想确认谁是谁、有人打错字/只记得大概名字时用它。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "QQ号或名字/拼音，比如 3353936945、laodie、老爹"},
+                    "limit": {"type": "integer", "description": "返回几个，默认8"},
+                },
+                "required": ["query"],
+            },
+        }
+    }
+
+
+def _edit_distance(a, b):
+    """编辑距离（短字符串，够用）。"""
+    a, b = str(a), str(b)
+    if abs(len(a) - len(b)) > 3:
+        return 99
+    dp = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        prev = dp[0]
+        dp[0] = i
+        for j, cb in enumerate(b, 1):
+            cur = dp[j]
+            dp[j] = min(dp[j] + 1, dp[j - 1] + 1, prev + (ca != cb))
+            prev = cur
+    return dp[len(b)]
+
+
 def _memory_tool_defs_v2():
     defs = [{
         "type": "function",
@@ -2477,12 +2655,17 @@ async def _mem_fetch_userinfo(ws):
         except Exception:
             pass
     _mem.save_userinfo()
-    print(f"👥 用户信息已更新：{n} 条记录（{len(_mem.userinfo.get('users', {}))} 人）")
+    print(f"👥 成员信息已更新：{n} 条记录（全部 {len(_mem.all_members.get('users', {}))} 人，活跃 {len(_mem.active_members.get('users', {}))} 人）")
 
 
 async def _mem_userinfo_loop(ws):
     while True:
         await asyncio.sleep(3600)
+        try:
+            if MEMORY_ENABLED and _mem is not None:
+                _mem.expire_active(MEMBER_ACTIVE_DAYS)
+        except Exception as e:
+            print(f"⚠️ 活跃成员过期检查失败：{e}")
         try:
             await _mem_fetch_userinfo(ws)
         except Exception as e:
@@ -6777,6 +6960,7 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         tools.append(_emoji_tool_def())
     if MEMORY_ENABLED and _mem is not None:
         tools.extend(_memory_tool_defs_v2())
+        tools.append(_members_tool_def())
     tools.extend(_bank_tool_defs())
 
     data = _build_chat_data(DEEPSEEK_MODEL, messages, ENABLE_THINKING_CHAT)
@@ -6842,6 +7026,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.add("remember")
     if MEMORY_BANK_ENABLED and _bank is not None:
         _runnable_names.add("search_memory")
+    if MEMORY_ENABLED and _mem is not None:
+        _runnable_names.add("search_members")
     runnable_calls = [
         tc for tc in tool_calls
         if tc.get("function", {}).get("name") in _runnable_names
@@ -6865,6 +7051,19 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 else:
                     messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                      "content": "❌ url 为空"})
+                continue
+
+            # 搜索全部成员名录
+            if _tool_name == "search_members":
+                try:
+                    _smarg = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _smarg = {}
+                _smq = str((_smarg or {}).get("query") or "").strip()
+                _sml = int((_smarg or {}).get("limit") or 8)
+                _smres = _mem.search_members(_smq, _sml) if _mem is not None else "❌ 记忆系统未启用"
+                print(f"🔍 搜索成员：{_smq} → {_smres.splitlines()[0] if _smres else '空'}")
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _smres})
                 continue
 
             # 记忆库搜索（语义检索，带前后文）
@@ -7311,6 +7510,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         tools.append(_emoji_tool_def())
     if MEMORY_ENABLED and _mem is not None:
         tools.extend(_memory_tool_defs_v2())
+        tools.append(_members_tool_def())
     tools.extend(_bank_tool_defs())
     # 群管理工具
     if ENABLE_GROUP_MODERATION and is_group:
@@ -7438,6 +7638,8 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
         _runnable_names.add("remember")
     if MEMORY_BANK_ENABLED and _bank is not None:
         _runnable_names.add("search_memory")
+    if MEMORY_ENABLED and _mem is not None:
+        _runnable_names.add("search_members")
     if ENABLE_GROUP_MODERATION and is_group:
         _runnable_names.add("group_moderation")
     if ENABLE_VOICE_TOOL:
@@ -7459,6 +7661,19 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
 
         for tool_call in runnable_calls:
             _tool_name = tool_call.get("function", {}).get("name")
+
+            # 搜索全部成员名录
+            if _tool_name == "search_members":
+                try:
+                    _smarg = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    _smarg = {}
+                _smq = str((_smarg or {}).get("query") or "").strip()
+                _sml = int((_smarg or {}).get("limit") or 8)
+                _smres = _mem.search_members(_smq, _sml) if _mem is not None else "❌ 记忆系统未启用"
+                print(f"🔍 搜索成员：{_smq} → {_smres.splitlines()[0] if _smres else '空'}")
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""), "content": _smres})
+                continue
 
             # 记忆库搜索（语义检索，带前后文）
             if _tool_name == "search_memory":
@@ -8546,6 +8761,11 @@ async def main():
                 # ===== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====
                 if not is_group:
                     _sleep_touch(user_id)
+                try:
+                    if MEMORY_ENABLED and _mem is not None:
+                        _mem.touch_active(user_id, nickname)
+                except Exception:
+                    pass
                 await _emo_observe_async(user_id, user_text)
                 if ENABLE_MERGE:
                     _merge_buf.setdefault(chat_id, []).append({
@@ -8761,6 +8981,8 @@ def _load_config_file():
     MEMORY_DIGEST_ENABLED = b("memory_digest_enabled", MEMORY_DIGEST_ENABLED)
     MEMORY_DIGEST_MAX = i("memory_digest_max", MEMORY_DIGEST_MAX)
     MEMORY_OTHER_CONTEXT_MSGS = i("memory_other_context_msgs", MEMORY_OTHER_CONTEXT_MSGS)
+    global MEMBER_ACTIVE_DAYS
+    MEMBER_ACTIVE_DAYS = i("member_active_days", MEMBER_ACTIVE_DAYS)
     if MEMORY_COMPRESS_TARGET >= MEMORY_COMPRESS_THRESHOLD:
         MEMORY_COMPRESS_TARGET = max(300, MEMORY_COMPRESS_THRESHOLD - 400)
     global EMOTION_ENABLED, EMOTION_SENSITIVITY

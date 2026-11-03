@@ -328,3 +328,6 @@ sleep_ask_enabled: true
 sleep_ask_interval_minutes: 60
 sleep_ask_protect_minutes: 10
 sleep_reply_wait_minutes: 15   # 发晚安后等多久回复，没回再下线
+
+# 活跃成员：多少天不说话从上下文移除（私聊白名单永久）
+member_active_days: 15

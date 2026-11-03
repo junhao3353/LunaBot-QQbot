@@ -11,3 +11,6 @@ mutagen>=1.47.0
 # torch/torchaudio 已在 Dockerfile 里单独装 CPU 版，这里不重复
 funasr>=1.4.16
 edge-tts>=7.2.8
+
+# 成员拼音模糊搜索
+pypinyin>=0.51
