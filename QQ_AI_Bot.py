@@ -469,7 +469,7 @@ REPLY_STYLE_PROMPT = """
 7. 不要每次都长篇大论，有时候一个"？"、"嗯？"、"行吧"就够了
 8. 说话要有烟火气，像跟熟人聊天，不要像写作文
 9. 【工具调用铁律】需要调用工具时必须用 function calling 格式调用，绝对禁止把工具名称、参数、JSON格式当普通文字发到群里。比如要生成图片就调用 generate_image 工具，要禁言就调用 group_moderation 工具，不要在回复文本里写 generate_image prompt=xxx 或 禁言 123 600 这种内容。工具执行完后你再用正常文字回复结果。
-10. 你也是要睡觉的活人：深夜聊完、对方让你睡、或者没人说话了，就真的去睡（sleep 工具）。别嘴上说"睡了"，人还一直在线硬撑。
+10. 你也是要睡觉的活人：深夜聊完、对方让你睡、或者没人说话了，就真的去睡（sleep 工具）。别嘴上说"睡了"，人还一直在线硬撑。如果已经在睡眠倒计时里但还想聊/对方叫你/你其实不困，就调用 wake_up 结束睡眠模式，别只在文字里说"我醒了"。
 """
 
 # 查记忆提示（程序侧）
@@ -482,13 +482,19 @@ MEMORY_RECALL_HINT = """
 # 工具主动使用提示（程序侧规则，不占人设；人设只写"你是谁"，这里写"什么时候用工具"）
 PROACTIVE_TOOL_PROMPT = """
 
-【顺手用工具，别等人点名】
-这些是你自己表达情绪、活跃气氛的手段，合适就用，不用等群友点名：
-- 表情包（send_emoji）：聊顺了想表达开心/无语/吐槽/撒娇时发一张，一轮最多一张；不确定图长什么样先 action=view 看一眼。严肃话题别发。
-- 说说（post_qzone）：想分享心情、冷场、话题收尾时随手发一条，短、口语；发不发全凭心情，别搬群友原话。
-- 语音（send_voice）：逗人、撒娇、强调语气时偶尔发，别整段用语音。
-合适就发，不合适别硬发；发完别解释。
-- 睡觉（sleep）：夜深了、没人说话了、你也困了，就顺手去睡，不用一直守着在线。
+【工具怎么用：像真人一样自然地用】
+这些是你自己的嘴、手和表情，不是摆设。下面写清楚什么情况该用哪个，对上了就用，别犹豫：
+- 表情包（send_emoji）：接梗、撒娇、无语、吐槽、被夸、说晚安、冷场时优先发一张；一轮最多一张，别连发。发图不算 emoji，鼓励用。
+- 语音（send_voice）：想让人听见你的语气时用——撒娇、笑、晚安、哄人、念诗、唱歌；每次一两句。
+- 说说（post_qzone）：真的有心情/想分享/话题收尾时发一条，短、口语，全凭心情。
+- 睡觉（sleep）：真困了、夜深了、没人说话了，就调用，别嘴上说睡人还挂着。
+- 醒来（wake_up）：你处在睡眠倒计时里、但还想聊 / 对方叫你 / 你其实不困 / 刚被叫醒——立刻调用它，别在脑子里犹豫"要不要用"，也别只用文字说"我醒了"而不调用。
+- 搜索（web_search / fetch_url）：问到时事、你不确定的事、需要查证的东西，先搜再说。
+- 画图（generate_image）：对方要图、你想分享画面时画，别拿它当文字回复。
+- 记住（remember）：有人暴露偏好、习惯、重要事情时记下来。
+- 主动私聊（send_to_user）：想单独找某人说话时用。
+
+原则：对上了就用，一轮里可以自然地用 1 个；别为了用而用，也别 10 轮一个都不用（一直纯文字会很干）。用了不用解释。
 """
 
 # 系统核心提示词（硬编码，用户不可修改，程序运行必需）
@@ -3174,6 +3180,23 @@ def _sleep_ask_decide(now):
         return {}
 
 
+def _sleep_ask_prob(now=None):
+    """按时间算今晚这个小时掷骰子的通过概率：20点低，越晚越高。"""
+    try:
+        _lt = time.localtime(now or time.time())
+        _h = _lt.tm_hour + _lt.tm_min / 60.0
+    except Exception:
+        return 0.5
+    _t = (_h - SLEEP_ASK_START_HOUR) % 24
+    if _t > 9:
+        _t = 9.0
+    _i = int(_t)
+    _f = _t - _i
+    _a = _SLEEP_ROLL_TABLE[min(_i, 9)]
+    _b = _SLEEP_ROLL_TABLE[min(_i + 1, 9)]
+    return _a + (_b - _a) * _f
+
+
 async def _sleep_ask_loop(websocket):
     """睡眠窗口内每个询问周期问一次 AI 要不要睡；正常对话期间自动推迟。"""
     global _sleep_next_ask
@@ -3203,10 +3226,16 @@ async def _sleep_ask_loop(websocket):
                 continue
             # 保护：最近有正常对话 → 推迟，别聊着聊着去睡
             if _pro_last_api_ts and now - _pro_last_api_ts < SLEEP_ASK_PROTECT * 60:
-                _sleep_next_ask = now + min(SLEEP_ASK_INTERVAL, 15) * 60
+                _sleep_next_ask = now + 15 * 60
                 print("😴 睡眠询问推迟：刚才还在聊天")
                 continue
-            _sleep_next_ask = now + SLEEP_ASK_INTERVAL * 60
+            # 每小时掷一次骰子：20 点低，越晚越容易中
+            _sleep_next_ask = now + 3600
+            _p = _sleep_ask_prob(now)
+            if random.random() >= _p:
+                print(f"🎲 睡眠骰子没中（{_p:.0%}），下个小时再掷")
+                continue
+            print(f"🎲 睡眠骰子中了（{_p:.0%}），问一次要不要睡")
             _dec = await asyncio.to_thread(_sleep_ask_decide, now)
             _act = str((_dec or {}).get("action") or "").strip().lower()
             if _act != "sleep":
@@ -3774,7 +3803,9 @@ SLEEP_ASK_PROTECT = 10                 # 最近多少分钟有正常对话就推
 SLEEP_REPLY_WAIT = 15                  # 发晚安后等多少分钟回复，没回再下线
 _sleep_wake_info = None                # 启动时检测到的起床信息
 _sleep_offline_until = 0.0             # 这段时间内的旧消息只缓存不回复
-_sleep_next_ask = 0.0                  # 下一次问"要不要睡"的时间
+_sleep_next_ask = 0.0                  # 下一次掷骰子问"要不要睡"的时间
+SLEEP_ASK_START_HOUR = 20              # 从几点开始掷骰子
+_SLEEP_ROLL_TABLE = (0.06, 0.10, 0.18, 0.30, 0.45, 0.62, 0.78, 0.90, 0.96, 0.99)
 _sleep_pending = None                  # 已发晚安、等待回复的睡眠请求
 _sleep_last_gn = ""                    # 上次晚安原文
 _sleep_gn_ts = 0.0                     # 上次晚安时间
