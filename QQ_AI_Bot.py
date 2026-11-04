@@ -3966,6 +3966,76 @@ def extract_records_from_message(message: str) -> list:
 _image_cache = {}
 _IMAGE_CACHE_MAX = 5    # 每个用户最多缓存5张，超过拒绝
 _IMAGE_CACHE_TTL = 120   # 每张图片缓存120秒，过期丢弃
+IMAGE_DESCRIBE_ENABLED = True   # 收图时调一次轻量视觉，生成内容描述进上下文
+IMAGE_DESCRIBE_MAX = 5          # 一条消息最多描述几张图
+_IMAGE_DESC_CACHE = {}          # data_url hash -> 描述（去重，省调用）
+_chat_image_notes = {}          # chat_id -> {"descs":[...], "ts":...} 纯图片静默时的描述备忘
+
+
+def _describe_image_light(data_url, timeout=25):
+    """轻量视觉调用：生成图片内容描述（一两句话），用于写入上下文。失败返回空串。"""
+    try:
+        import hashlib
+        _k = hashlib.md5(str(data_url)[-4000:].encode("utf-8", "ignore")).hexdigest()
+    except Exception:
+        _k = None
+    if _k and _k in _IMAGE_DESC_CACHE:
+        return _IMAGE_DESC_CACHE[_k]
+    try:
+        _model = DEEPSEEK_MODEL if USE_CHAT_MODEL_FOR_VISION else DEEPSEEK_VISION_MODEL
+        _payload = {
+            "model": _model or DEEPSEEK_VISION_MODEL or DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": "你是图片描述器。用一两句中文客观描述这张图里有什么：主体、动作、场景、画面里的文字。只输出描述，不要评论、不要客套。"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "描述这张图"},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ]},
+            ],
+            "thinking": {"type": "disabled"},
+            "temperature": 0.2, "max_tokens": 180,
+        }
+        r = requests.post("https://api.deepseek.com/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+                          json=_payload, timeout=timeout)
+        if r.status_code != 200:
+            print(f"⚠️ 图片描述失败（HTTP {r.status_code}）")
+            return ""
+        _c = (((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+        _d = " ".join(str(_c).split())[:200]
+        if _k and _d:
+            _IMAGE_DESC_CACHE[_k] = _d
+            if len(_IMAGE_DESC_CACHE) > 300:
+                _IMAGE_DESC_CACHE.clear()
+        return _d
+    except Exception as e:
+        print(f"⚠️ 图片描述异常：{e}")
+        return ""
+
+
+def _image_tag_from_descs(descs, count):
+    """把图片描述拼成上下文标签：[图片1 内容：…] [图片2 内容：…]。"""
+    _ds = list(descs or [])
+    if any(_ds):
+        tags = []
+        for i, d in enumerate(_ds):
+            tags.append(f"[图片{i+1} 内容：{d}]" if d else f"[图片{i+1}]")
+        return " ".join(tags)
+    return f"[图片x{count}]"
+
+
+def _apply_image_notes(chat_id, user_text, max_age=600):
+    """上一轮纯图片静默时存了描述：这轮文字消息把它带上并清掉。"""
+    try:
+        note = _chat_image_notes.get(chat_id) or {}
+        if note and time.time() - float(note.get("ts") or 0) < max_age:
+            nd = "；".join(note.get("descs") or [])[:300]
+            _chat_image_notes.pop(chat_id, None)
+            if nd:
+                return f"（刚才发来的图片：{nd}）{user_text or ''}"
+    except Exception:
+        pass
+    return user_text
 
 
 def _cache_add_image(chat_id, user_id, data_url):
@@ -8601,18 +8671,25 @@ async def main():
                 _current_raw_msg = raw_msg
 
                 # 下载图片转base64并加入该用户缓存（每张60秒过期，每人最多10张）
+                img_descs = []
                 if image_urls:
                     print(f"🖼️  检测到{len(image_urls)}张图片，下载并缓存...")
-                    for img_url in image_urls:
+                    for _idx, img_url in enumerate(image_urls):
                         data_url, dl_err = await asyncio.to_thread(download_image_as_data_url, img_url)
+                        _desc = ""
                         if data_url:
                             cnt, rejected = _cache_add_image(chat_id, user_id, data_url)
                             if rejected:
-                                print(f"⚠️ 图片缓存已满（上限{_IMAGE_CACHE_MAX}张），拒绝新图片")
+                                print(f"⚠️ 图片缓存已满（上限{_IMAGE_CACHE_MAX}张），拒绝新图片（描述仍会生成）")
                             else:
                                 print(f"📦 图片已缓存（该用户当前{cnt}/{_IMAGE_CACHE_MAX}张，{_IMAGE_CACHE_TTL}秒有效）")
+                            # 生成描述进上下文（后面轮次也能看到图片内容；缓存满了也描述）
+                                _desc = await asyncio.to_thread(_describe_image_light, data_url)
+                                if _desc:
+                                    print(f"🖼️  图片{_idx+1}内容：{_desc[:50]}")
                         else:
                             print(f"⚠️ 图片下载失败：{dl_err}")
+                        img_descs.append(_desc)
 
                 # 视频：下载→查时长(>10分钟拒)→抽帧缓存（每人只存一个）
                 if ENABLE_VIDEO and video_urls:
@@ -8654,6 +8731,9 @@ async def main():
 
                 # 纯图片且没在叫它：静默缓存，不调AI、不发提示（等它被@/用户发文字时再连图一起处理）
                 if _is_pure_image_silent(image_urls, _plain_text, is_group, at_flag):
+                    _real = [d for d in img_descs if d]
+                    if _real:
+                        _chat_image_notes[chat_id] = {"descs": _real, "ts": time.time()}
                     continue
 
                 # 群消息：没@就只记旁听缓存；@了才取正文继续回复。私聊不需要@
@@ -8790,10 +8870,14 @@ async def main():
                     continue
 
 
+                # 上一轮纯图片静默时存了描述：这轮文字消息把它带上，AI 才知道刚发的图是什么
+                if not image_urls:
+                    user_text = _apply_image_notes(chat_id, user_text)
+
                 # 保存用户文本用于聊天记录
                 display_text = user_text if user_text else "[无文字]"
                 if image_urls:
-                    img_tag = f"[图片x{len(image_urls)}]"
+                    img_tag = _image_tag_from_descs(img_descs, len(image_urls))
                     display_text = (display_text + " " + img_tag) if display_text != "[无文字]" else img_tag
                 if video_urls:
                     vid_tag = f"[视频x{len(video_urls)}]"
@@ -9009,6 +9093,9 @@ def _load_config_file():
 
     # 记忆系统 v2：长期画像 + 临时记忆
     global MEMORY_ENABLED, MEMORY_SAVER_MODE, MEMORY_DIR, MEMORY_PROFILE_MAX_CHARS, MEMORY_COMPRESS_THRESHOLD
+    global IMAGE_DESCRIBE_ENABLED, IMAGE_DESCRIBE_MAX
+    IMAGE_DESCRIBE_ENABLED = b("image_describe_enabled", IMAGE_DESCRIBE_ENABLED)
+    IMAGE_DESCRIBE_MAX = i("image_describe_max", IMAGE_DESCRIBE_MAX)
     global MEMORY_COMPRESS_TARGET, MEMORY_COMPRESS_INTERVAL, MEMORY_CONTEXT_ROUNDS, MEMORY_QZONE_MAX
     global MEMORY_MEMO_MAX, MEMORY_REMEMBER_MAX_CHARS, MEMORY_FULL_INJECT_MAX_CHARS, MEMORY_RECENT_SPEAKERS
     global MEMORY_DIGEST_ENABLED, MEMORY_DIGEST_MAX, MEMORY_OTHER_CONTEXT_MSGS

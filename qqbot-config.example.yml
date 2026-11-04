@@ -331,3 +331,7 @@ sleep_reply_wait_minutes: 15   # 发晚安后等多久回复，没回再下线
 
 # 活跃成员：多少天不说话从上下文移除（私聊白名单永久）
 member_active_days: 15
+
+# 图片内容描述进上下文（后续轮次也能知道图片里是什么）
+image_describe_enabled: true
+image_describe_max: 5
