@@ -540,3 +540,7 @@ embedding_dim: 1024
   - 多图按序号列出：[图片1 内容：…] [图片2 内容：…]；超过 image_describe_max 或失败时回退 [图片N]
   - 纯图片静默消息：描述先存备忘，下一条文字消息自动带上「（刚才发来的图片：…）」，600 秒内有效
   - 描述按图片内容 hash 缓存，重复图不重复调；配置 image_describe_enabled / image_describe_max
+
+- 修复连发多图只记录一张（2026-11-04）：
+  - 纯图片静默备忘原来按 chat_id 存且直接覆盖，连发两张只留最后一张
+  - 改为按 (chat_id, user_id) 存，描述追加而不是覆盖（最多 image_describe_max 张），下一条文字消息一次带上全部

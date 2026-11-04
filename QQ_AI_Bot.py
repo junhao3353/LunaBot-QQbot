@@ -4024,13 +4024,19 @@ def _image_tag_from_descs(descs, count):
     return f"[图片x{count}]"
 
 
-def _apply_image_notes(chat_id, user_text, max_age=600):
-    """上一轮纯图片静默时存了描述：这轮文字消息把它带上并清掉。"""
+def _apply_image_notes(chat_id, user_user_or_text, user_text=None, max_age=600):
+    """上一轮纯图片静默时存了描述：这轮文字消息把它带上并清掉。
+    兼容旧调用：(chat_id, text) / 新调用：(chat_id, user_id, text)"""
+    if user_text is None:
+        user_text = user_user_or_text
+        _key = chat_id
+    else:
+        _key = (chat_id, user_user_or_text)
     try:
-        note = _chat_image_notes.get(chat_id) or {}
+        note = _chat_image_notes.get(_key) or {}
         if note and time.time() - float(note.get("ts") or 0) < max_age:
             nd = "；".join(note.get("descs") or [])[:300]
-            _chat_image_notes.pop(chat_id, None)
+            _chat_image_notes.pop(_key, None)
             if nd:
                 return f"（刚才发来的图片：{nd}）{user_text or ''}"
     except Exception:
@@ -8733,7 +8739,11 @@ async def main():
                 if _is_pure_image_silent(image_urls, _plain_text, is_group, at_flag):
                     _real = [d for d in img_descs if d]
                     if _real:
-                        _chat_image_notes[chat_id] = {"descs": _real, "ts": time.time()}
+                        _k = (chat_id, user_id)
+                        _old = _chat_image_notes.get(_k) or {}
+                        _all = list(_old.get("descs") or []) + _real
+                        _chat_image_notes[_k] = {"descs": _all[-IMAGE_DESCRIBE_MAX:], "ts": time.time()}
+                        print(f"🖼️  纯图片静默，已记录 {len(_real)} 张描述（该会话待补共 {len(_chat_image_notes[_k]['descs'])} 张）")
                     continue
 
                 # 群消息：没@就只记旁听缓存；@了才取正文继续回复。私聊不需要@
@@ -8872,7 +8882,7 @@ async def main():
 
                 # 上一轮纯图片静默时存了描述：这轮文字消息把它带上，AI 才知道刚发的图是什么
                 if not image_urls:
-                    user_text = _apply_image_notes(chat_id, user_text)
+                    user_text = _apply_image_notes(chat_id, user_id, user_text)
 
                 # 保存用户文本用于聊天记录
                 display_text = user_text if user_text else "[无文字]"
