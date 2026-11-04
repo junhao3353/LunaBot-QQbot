@@ -3969,7 +3969,6 @@ _IMAGE_CACHE_TTL = 120   # 每张图片缓存120秒，过期丢弃
 IMAGE_DESCRIBE_ENABLED = True   # 收图时调一次轻量视觉，生成内容描述进上下文
 IMAGE_DESCRIBE_MAX = 5          # 一条消息最多描述几张图
 _IMAGE_DESC_CACHE = {}          # data_url hash -> 描述（去重，省调用）
-_chat_image_notes = {}          # chat_id -> {"descs":[...], "ts":...} 纯图片静默时的描述备忘
 
 
 def _describe_image_light(data_url, timeout=25):
@@ -4013,6 +4012,27 @@ def _describe_image_light(data_url, timeout=25):
         return ""
 
 
+def _save_silent_image_context(chat_id, is_group, user_id, descs):
+    """纯图片静默：把图片描述直接写进该会话上下文（不回复），后续轮次自然能看到。"""
+    _ds = [d for d in (descs or []) if d]
+    if not _ds or _mem is None or not MEMORY_ENABLED:
+        return False
+    try:
+        _his = _mem.load_context(chat_id, is_group)
+        _tag = " ".join(f"[图片{i+1} 内容：{d}]" for i, d in enumerate(_ds))
+        _his.append({"role": "user", "content": f"[{_format_now()}][QQ号:{user_id}]（发来图片，没说话）{_tag}"})
+        _limit = MEMORY_CONTEXT_ROUNDS * 2
+        while len(_his) > _limit:
+            _his.pop(0)
+        _mem.save_context(chat_id, is_group, _his)
+        group_history[f"g_{chat_id}" if is_group else f"p_{chat_id}"] = _his
+        print(f"🖼️  纯图片静默：{len(_ds)} 张图描述已写入上下文")
+        return True
+    except Exception as e:
+        print(f"⚠️ 静默图片写上下文失败：{e}")
+        return False
+
+
 def _image_tag_from_descs(descs, count):
     """把图片描述拼成上下文标签：[图片1 内容：…] [图片2 内容：…]。"""
     _ds = list(descs or [])
@@ -4022,26 +4042,6 @@ def _image_tag_from_descs(descs, count):
             tags.append(f"[图片{i+1} 内容：{d}]" if d else f"[图片{i+1}]")
         return " ".join(tags)
     return f"[图片x{count}]"
-
-
-def _apply_image_notes(chat_id, user_user_or_text, user_text=None, max_age=600):
-    """上一轮纯图片静默时存了描述：这轮文字消息把它带上并清掉。
-    兼容旧调用：(chat_id, text) / 新调用：(chat_id, user_id, text)"""
-    if user_text is None:
-        user_text = user_user_or_text
-        _key = chat_id
-    else:
-        _key = (chat_id, user_user_or_text)
-    try:
-        note = _chat_image_notes.get(_key) or {}
-        if note and time.time() - float(note.get("ts") or 0) < max_age:
-            nd = "；".join(note.get("descs") or [])[:300]
-            _chat_image_notes.pop(_key, None)
-            if nd:
-                return f"（刚才发来的图片：{nd}）{user_text or ''}"
-    except Exception:
-        pass
-    return user_text
 
 
 def _cache_add_image(chat_id, user_id, data_url):
@@ -8737,13 +8737,7 @@ async def main():
 
                 # 纯图片且没在叫它：静默缓存，不调AI、不发提示（等它被@/用户发文字时再连图一起处理）
                 if _is_pure_image_silent(image_urls, _plain_text, is_group, at_flag):
-                    _real = [d for d in img_descs if d]
-                    if _real:
-                        _k = (chat_id, user_id)
-                        _old = _chat_image_notes.get(_k) or {}
-                        _all = list(_old.get("descs") or []) + _real
-                        _chat_image_notes[_k] = {"descs": _all[-IMAGE_DESCRIBE_MAX:], "ts": time.time()}
-                        print(f"🖼️  纯图片静默，已记录 {len(_real)} 张描述（该会话待补共 {len(_chat_image_notes[_k]['descs'])} 张）")
+                    _save_silent_image_context(chat_id, is_group, user_id, img_descs)
                     continue
 
                 # 群消息：没@就只记旁听缓存；@了才取正文继续回复。私聊不需要@
@@ -8879,10 +8873,6 @@ async def main():
                     chat_print(f"{'群' if is_group else '私聊'}{chat_id} | 用户{user_id}：{user_text}\n AI回复：[Token余额]")
                     continue
 
-
-                # 上一轮纯图片静默时存了描述：这轮文字消息把它带上，AI 才知道刚发的图是什么
-                if not image_urls:
-                    user_text = _apply_image_notes(chat_id, user_id, user_text)
 
                 # 保存用户文本用于聊天记录
                 display_text = user_text if user_text else "[无文字]"
